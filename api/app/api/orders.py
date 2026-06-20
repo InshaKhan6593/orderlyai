@@ -7,7 +7,7 @@ from fastapi import APIRouter, Query, status
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
-from app.core.deps import BusinessDep, DbSession
+from app.core.deps import BusinessDep, CurrentUser, DbSession
 from app.core.errors import BadRequestError
 from app.models.order import Order
 from app.schemas.order import OrderCreate, OrderOut, OrderStatusUpdate
@@ -22,12 +22,16 @@ async def list_orders(
     db: DbSession,
     status_filter: str | None = Query(default=None, alias="status"),
     fulfillment: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
 ) -> list[Order]:
     stmt = (
         select(Order)
         .where(Order.business_id == business.id)
         .options(selectinload(Order.items), selectinload(Order.status_history))
         .order_by(Order.created_at.desc())
+        .limit(limit)
+        .offset(offset)
     )
     if status_filter:
         stmt = stmt.where(Order.status == status_filter)
@@ -51,7 +55,13 @@ async def get_order(order_id: uuid.UUID, business: BusinessDep, db: DbSession) -
 
 @router.patch("/{order_id}/status", response_model=OrderOut)
 async def update_order_status(
-    order_id: uuid.UUID, data: OrderStatusUpdate, business: BusinessDep, db: DbSession
+    order_id: uuid.UUID,
+    data: OrderStatusUpdate,
+    business: BusinessDep,
+    user: CurrentUser,
+    db: DbSession,
 ) -> Order:
-    order = await order_service.load_order(db, business.id, order_id)
-    return await order_service.update_status(db, order, data.status, data.changed_by)
+    # Lock the row so concurrent status changes serialize, and record the
+    # authenticated user as the auditor (never a client-supplied value).
+    order = await order_service.load_order(db, business.id, order_id, for_update=True)
+    return await order_service.update_status(db, order, data.status, changed_by=str(user.id))

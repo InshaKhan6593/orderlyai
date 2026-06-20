@@ -17,7 +17,7 @@ _STATUS = (
 
 class OrderLineIn(BaseModel):
     product_id: uuid.UUID
-    quantity: int = Field(ge=1)
+    quantity: int = Field(ge=1, le=999)
     option_item_ids: list[uuid.UUID] = Field(default_factory=list)
 
 
@@ -29,12 +29,12 @@ class OrderCreate(BaseModel):
     zone_id: uuid.UUID | None = None
     payment_method: str = Field(default="cod", pattern="^(cod|link|paid)$")
     notes: str | None = None
-    items: list[OrderLineIn] = Field(min_length=1)
+    items: list[OrderLineIn] = Field(min_length=1, max_length=100)
 
 
 class OrderStatusUpdate(BaseModel):
+    # `changed_by` is derived from the authenticated user server-side, never the client.
     status: str = Field(pattern=_STATUS)
-    changed_by: str | None = None
 
 
 class OrderItemOut(ORMModel):

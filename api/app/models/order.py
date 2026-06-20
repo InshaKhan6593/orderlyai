@@ -10,6 +10,7 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
@@ -52,6 +53,9 @@ class Order(UUIDMixin, TimestampMixin, Base):
         CheckConstraint(
             "payment_status in ('unpaid','paid','refunded')", name="orders_payment_status"
         ),
+        # Dashboard lists orders per business, newest-first and filtered by status.
+        Index("ix_orders_business_created", "business_id", "created_at"),
+        Index("ix_orders_business_status_created", "business_id", "status", "created_at"),
     )
 
     business_id: Mapped[uuid.UUID] = mapped_column(

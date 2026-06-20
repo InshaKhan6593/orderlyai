@@ -8,11 +8,24 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from app.core.deps import BusinessDep, DbSession
-from app.core.errors import NotFoundError
-from app.models.menu import Product, ProductOptionGroup, ProductOptionItem
+from app.core.errors import BadRequestError, NotFoundError
+from app.models.menu import Category, Product, ProductOptionGroup, ProductOptionItem
 from app.schemas.menu import OptionGroupIn, ProductCreate, ProductOut, ProductUpdate
 
 router = APIRouter(prefix="/businesses/{business_id}/products", tags=["menu"])
+
+
+async def _validate_category(db, business_id: uuid.UUID, category_id: uuid.UUID | None) -> None:
+    """Reject a category that belongs to another tenant (or doesn't exist)."""
+    if category_id is None:
+        return
+    owned = await db.scalar(
+        select(Category.id).where(
+            Category.id == category_id, Category.business_id == business_id
+        )
+    )
+    if owned is None:
+        raise BadRequestError("category_id does not belong to this business")
 
 
 def _with_options():
@@ -81,6 +94,7 @@ async def list_products(
 
 @router.post("", response_model=ProductOut, status_code=status.HTTP_201_CREATED)
 async def create_product(data: ProductCreate, business: BusinessDep, db: DbSession) -> Product:
+    await _validate_category(db, business.id, data.category_id)
     product = Product(
         business_id=business.id,
         category_id=data.category_id,
@@ -110,6 +124,8 @@ async def update_product(
 ) -> Product:
     product = await _get(db, business.id, product_id)
     payload = data.model_dump(exclude_unset=True)
+    if payload.get("category_id") is not None:
+        await _validate_category(db, business.id, payload["category_id"])
     groups = payload.pop("option_groups", None)
     for field, value in payload.items():
         setattr(product, field, value)

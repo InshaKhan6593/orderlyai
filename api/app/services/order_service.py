@@ -10,7 +10,8 @@ import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -22,25 +23,51 @@ from app.models.order import Order, OrderItem, OrderStatusHistory
 from app.models.ops import DeliveryZone
 from app.schemas.order import OrderCreate
 
-# Allowed status transitions (mirrors the dashboard state machine).
-TRANSITIONS: dict[str, set[str]] = {
+# Allowed status transitions, per fulfillment type. `ready` and `out_for_delivery`
+# are the parallel stage-4 states keyed by fulfillment (see design docs 07 §3 and
+# the dashboard "Preparing → [Mark ready] (pickup) or [Out for delivery]
+# (delivery)" buttons): pickup goes `preparing → ready → completed`; delivery
+# dispatches directly `preparing → out_for_delivery → completed`.
+_COMMON: dict[str, set[str]] = {
     "pending": {"accepted", "rejected", "cancelled"},
     "accepted": {"preparing", "cancelled"},
-    "preparing": {"ready", "out_for_delivery", "cancelled"},
-    "ready": {"completed", "cancelled"},
-    "out_for_delivery": {"completed", "cancelled"},
     "completed": set(),
     "rejected": set(),
     "cancelled": set(),
 }
+TRANSITIONS: dict[str, dict[str, set[str]]] = {
+    "pickup": {
+        **_COMMON,
+        "preparing": {"ready", "cancelled"},
+        "ready": {"completed", "cancelled"},
+    },
+    "delivery": {
+        **_COMMON,
+        "preparing": {"out_for_delivery", "cancelled"},
+        "out_for_delivery": {"completed", "cancelled"},
+    },
+}
 
 
-async def load_order(db: AsyncSession, business_id: uuid.UUID, order_id: uuid.UUID) -> Order:
-    order = await db.scalar(
+async def load_order(
+    db: AsyncSession,
+    business_id: uuid.UUID,
+    order_id: uuid.UUID,
+    *,
+    for_update: bool = False,
+) -> Order:
+    stmt = (
         select(Order)
         .where(Order.id == order_id, Order.business_id == business_id)
         .options(selectinload(Order.items), selectinload(Order.status_history))
+        # `expire_on_commit=False` keeps committed objects in the identity map;
+        # repopulate so a re-read after a write returns fresh rows/collections.
+        .execution_options(populate_existing=True)
     )
+    if for_update:
+        # Lock only the orders row; the selectinload children load separately.
+        stmt = stmt.with_for_update(of=Order)
+    order = await db.scalar(stmt)
     if order is None:
         raise NotFoundError("Order not found")
     return order
@@ -57,21 +84,24 @@ async def _next_order_no(db: AsyncSession, business_id: uuid.UUID) -> int:
     return int(result.scalar_one()) - 1
 
 
-async def _get_or_create_customer(
+async def _upsert_customer_id(
     db: AsyncSession, business_id: uuid.UUID, phone: str, name: str | None
-) -> Customer:
-    customer = await db.scalar(
-        select(Customer).where(
-            Customer.business_id == business_id, Customer.wa_phone == phone
-        )
+) -> uuid.UUID:
+    """Atomically upsert (business_id, wa_phone) and return the customer id.
+
+    Uses PostgreSQL ``ON CONFLICT`` so concurrent first orders from the same
+    phone can't violate the unique constraint. An existing name is preserved;
+    a missing name is backfilled.
+    """
+    stmt = pg_insert(Customer).values(
+        business_id=business_id, wa_phone=phone, name=name
     )
-    if customer is None:
-        customer = Customer(business_id=business_id, wa_phone=phone, name=name)
-        db.add(customer)
-        await db.flush()
-    elif name and not customer.name:
-        customer.name = name
-    return customer
+    stmt = stmt.on_conflict_do_update(
+        constraint="customers_business_phone",
+        set_={"name": func.coalesce(Customer.name, stmt.excluded.name)},
+    ).returning(Customer.id)
+    result = await db.execute(stmt)
+    return result.scalar_one()
 
 
 async def create_order(db: AsyncSession, business: Business, data: OrderCreate) -> Order:
@@ -80,22 +110,30 @@ async def create_order(db: AsyncSession, business: Business, data: OrderCreate) 
     if data.fulfillment == "pickup" and not business.offers_pickup:
         raise BadRequestError("This business does not offer pickup")
 
-    customer = await _get_or_create_customer(
+    customer_id = await _upsert_customer_id(
         db, business.id, data.customer_phone, data.customer_name
     )
+
+    # Bulk-fetch every referenced product (with its modifiers) in one query.
+    product_ids = {line.product_id for line in data.items}
+    rows = await db.execute(
+        select(Product)
+        .where(Product.id.in_(product_ids), Product.business_id == business.id)
+        .options(selectinload(Product.option_groups).selectinload(ProductOptionGroup.items))
+    )
+    products = {p.id: p for p in rows.scalars().all()}
 
     subtotal = Decimal("0")
     items: list[OrderItem] = []
     for line in data.items:
-        product = await db.scalar(
-            select(Product)
-            .where(Product.id == line.product_id, Product.business_id == business.id)
-            .options(selectinload(Product.option_groups).selectinload(ProductOptionGroup.items))
-        )
+        product = products.get(line.product_id)
         if product is None or product.is_archived:
             raise BadRequestError(f"Product {line.product_id} is not on this menu")
         if not product.is_available:
             raise BadRequestError(f"'{product.name}' is currently unavailable")
+
+        if len(set(line.option_item_ids)) != len(line.option_item_ids):
+            raise BadRequestError(f"Duplicate options selected for '{product.name}'")
 
         # Validate the selected options against THIS product's own groups.
         item_by_id = {i.id: i for g in product.option_groups for i in g.items}
@@ -129,6 +167,10 @@ async def create_order(db: AsyncSession, business: Business, data: OrderCreate) 
             )
 
         unit_price = product.price + deltas
+        if unit_price < 0:
+            # Negative modifier deltas (discounts) are allowed, but they can
+            # never drive a line price below zero.
+            raise BadRequestError(f"Invalid option pricing for '{product.name}'")
         line_total = unit_price * line.quantity
         subtotal += line_total
         items.append(
@@ -149,6 +191,12 @@ async def create_order(db: AsyncSession, business: Business, data: OrderCreate) 
         zone = await db.get(DeliveryZone, data.zone_id)
         if zone is None or zone.business_id != business.id:
             raise BadRequestError("Invalid delivery zone")
+        if not zone.is_active:
+            raise BadRequestError(f"Delivery zone '{zone.name}' is not active")
+        if subtotal < zone.min_order:
+            raise BadRequestError(
+                f"Minimum order for '{zone.name}' is {zone.min_order}"
+            )
         delivery_fee = zone.fee
         zone_id = zone.id
 
@@ -157,7 +205,7 @@ async def create_order(db: AsyncSession, business: Business, data: OrderCreate) 
 
     order = Order(
         business_id=business.id,
-        customer_id=customer.id,
+        customer_id=customer_id,
         order_no=await _next_order_no(db, business.id),
         fulfillment=data.fulfillment,
         address=data.address,
@@ -176,8 +224,16 @@ async def create_order(db: AsyncSession, business: Business, data: OrderCreate) 
     ]
     db.add(order)
 
-    customer.order_count += 1
-    customer.last_order_at = datetime.now(timezone.utc)
+    # Atomic counter bump — avoids the lost-update race of read-modify-write.
+    # Scoped by business_id per the tenant-isolation rule (defense in depth).
+    await db.execute(
+        update(Customer)
+        .where(Customer.id == customer_id, Customer.business_id == business.id)
+        .values(
+            order_count=Customer.order_count + 1,
+            last_order_at=datetime.now(timezone.utc),
+        )
+    )
 
     await db.commit()
     return await load_order(db, business.id, order.id)
@@ -186,7 +242,7 @@ async def create_order(db: AsyncSession, business: Business, data: OrderCreate) 
 async def update_status(
     db: AsyncSession, order: Order, new_status: str, changed_by: str | None
 ) -> Order:
-    allowed = TRANSITIONS.get(order.status, set())
+    allowed = TRANSITIONS.get(order.fulfillment, {}).get(order.status, set())
     if new_status not in allowed:
         raise BadRequestError(
             f"Cannot change status from '{order.status}' to '{new_status}'"

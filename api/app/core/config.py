@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     # App
     app_name: str = "OrderlyAI API"
     env: str = "local"
-    debug: bool = True
+    debug: bool = False  # opt in via DEBUG=true in .env for local dev
     api_v1_prefix: str = "/api/v1"
 
     # Database

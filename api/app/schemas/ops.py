@@ -5,7 +5,7 @@ import uuid
 from datetime import time
 from decimal import Decimal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.schemas.common import ORMModel
 
@@ -19,6 +19,13 @@ class HoursItem(BaseModel):
 
 class HoursBulkIn(BaseModel):
     hours: list[HoursItem] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _no_duplicate_days(self) -> "HoursBulkIn":
+        days = [h.day_of_week for h in self.hours]
+        if len(days) != len(set(days)):
+            raise ValueError("duplicate day_of_week entries are not allowed")
+        return self
 
 
 class HoursOut(ORMModel):

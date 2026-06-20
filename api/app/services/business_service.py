@@ -4,8 +4,10 @@ from __future__ import annotations
 import uuid
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.errors import ConflictError
 from app.core.utils import slugify
 from app.models.business import Business, Membership
 from app.models.user import User
@@ -29,8 +31,15 @@ async def create_business(db: AsyncSession, user: User, data: BusinessCreate) ->
         currency=data.currency,
     )
     db.add(business)
-    await db.flush()
-    db.add(Membership(user_id=user.id, business_id=business.id, role="owner"))
-    await db.commit()
+    try:
+        # The slug UNIQUE violation surfaces at flush() (the INSERT), so the
+        # whole write — flush + membership + commit — must be guarded.
+        await db.flush()
+        db.add(Membership(user_id=user.id, business_id=business.id, role="owner"))
+        await db.commit()
+    except IntegrityError:
+        # Slug collided with a concurrent create — caller may retry.
+        await db.rollback()
+        raise ConflictError("Could not create business, please retry")
     await db.refresh(business)
     return business

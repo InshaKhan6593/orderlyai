@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import ConflictError, UnauthorizedError
@@ -25,7 +26,12 @@ async def register_user(db: AsyncSession, data: RegisterIn) -> User:
         full_name=data.full_name,
     )
     db.add(user)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        # Lost the race against a concurrent registration with the same email.
+        await db.rollback()
+        raise ConflictError("An account with this email already exists")
     await db.refresh(user)
     return user
 

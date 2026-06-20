@@ -25,7 +25,7 @@ is one **tenant**). Target scale: 100–150+ business tenants.
 
 | Area | State |
 |------|-------|
-| **Backend CMS API** (`api/`) | ✅ Built, running, and tested (32 passing tests) |
+| **Backend CMS API** (`api/`) | ✅ Built, running, and tested (43 passing tests) |
 | Database (Postgres 16 in Docker) | ✅ Schema + Alembic migrations applied |
 | Auth (self-managed JWT) | ✅ Done |
 | **Frontend** (Next.js) | ❌ Not built yet — screens are prototyped (see design docs) |
@@ -229,24 +229,43 @@ Key points:
 
 ## 10. Business rules
 
-- **Order status machine** (`order_service.TRANSITIONS`):
-  `pending → accepted → preparing → ready | out_for_delivery → completed`, with `rejected`/`cancelled` as
-  early exits. Invalid jumps return 400. Every change appends an `order_status_history` row.
+- **Order status machine** (`order_service.TRANSITIONS`) is **fulfillment-aware** — `ready` and
+  `out_for_delivery` are the parallel stage-4 states keyed by fulfillment (per design docs 07 §3): pickup is
+  `pending → accepted → preparing → ready → completed`; delivery dispatches directly
+  `pending → accepted → preparing → out_for_delivery → completed` (pickup never uses `out_for_delivery`;
+  delivery has no `ready` stage). `rejected`/`cancelled` are early exits.
+  Invalid jumps return 400. Every change appends an `order_status_history` row whose `changed_by` is the
+  **authenticated user id** (derived server-side, never trusted from the request body). The status update
+  loads the order `FOR UPDATE` so concurrent transitions serialize.
 - **Pricing:** `unit = product.price + Σ(option.price_delta)`, `line_total = unit × qty`,
   `subtotal = Σ line_totals`, `total = subtotal + delivery_fee + packaging_fee`. Delivery fee comes from the
-  chosen `delivery_zone`; packaging fee from the business.
+  chosen `delivery_zone`; packaging fee from the business. Negative `price_delta` (discounts) is allowed, but a
+  line whose `unit` would go **negative** is rejected (400).
 - **Modifier validation:** on order creation, selected options are validated against the product's own
   groups — required groups must be chosen, `min_select`/`max_select` are honored, single-select groups accept
-  at most one, and options from another product/business are rejected (all → 400). See
-  `order_service.create_order`.
+  at most one, duplicate option ids in a line are rejected, and options from another product/business are
+  rejected (all → 400). See `order_service.create_order` (products are bulk-fetched in one query).
+- **Category ownership:** a product's `category_id` must belong to the same business (validated on
+  create/update → 400); app-layer scoping is the guard (no cross-tenant category references).
+- **Delivery zones:** a provided `zone_id` must be owned by the business, **active**, and the `subtotal` must
+  meet the zone's `min_order` (all → 400).
 - **Order numbers** are assigned atomically via `UPDATE businesses SET next_order_no = next_order_no + 1
   … RETURNING` inside the create transaction.
 - **`accepting_orders = false`** blocks `POST /orders` (the owner's instant kill-switch).
-- **Customers** are upserted by `(business_id, wa_phone)` during order creation.
+- **Customers** are upserted by `(business_id, wa_phone)` via PostgreSQL `ON CONFLICT` during order creation,
+  and `order_count` is bumped with an atomic `UPDATE` (no read-modify-write race).
+- **Business hours** allow at most one row per weekday — duplicate `day_of_week` is rejected (422), backed by
+  `UNIQUE (business_id, day_of_week)`.
+- **Pagination:** list endpoints for orders and customers take `?limit=` (1–200, default 50) and `?offset=`.
 
 > **Deferred order validation (implement in the agent / order-flow phase, with tests):** the engine does
-> **not** yet require a delivery **address** when `fulfillment="delivery"`, nor enforce the business
-> `min_order_amount`. These tie into the WhatsApp ordering flow — add them when building the agent.
+> **not** yet require a delivery **address** when `fulfillment="delivery"`, nor enforce the *business-level*
+> `min_order_amount` (distinct from per-zone `min_order`, which **is** enforced), nor make a delivery `zone`
+> mandatory. These tie into the WhatsApp ordering flow — add them when building the agent.
+>
+> **Also deferred (auth/roles hardening phase):** `get_business` authorizes any membership regardless of
+> `owner|manager|staff` role — fine today because no endpoint creates non-owner memberships yet; add role
+> gating when membership management ships. Auth rate-limiting and refresh-token rotation are not implemented.
 
 ---
 
@@ -255,11 +274,13 @@ Key points:
 - `tests/conftest.py` builds an isolated **`orderlyai_test`** DB (create_all/drop_all per session, NullPool
   engine), overrides `get_db`, and exposes a sync **`TestClient`** plus fixtures: **`client`**, **`owner`**
   (registered user → auth header), **`business`** (owner + created business → `(headers, business_id)`).
-- Coverage today (**32 tests**): `test_auth.py` (register/login/me/dupe/wrong-pw/validation),
+- Coverage today (**43 tests**): `test_auth.py` (register/login/me/dupe/wrong-pw/validation),
   `test_tenant_isolation.py` (outsiders get 403; `GET /businesses` only lists own), `test_orders.py`
-  (pricing includes modifier deltas, `order_no` increments, invalid status transition rejected), and
+  (pricing includes modifier deltas, `order_no` increments, invalid status transition rejected),
   `test_validation_and_crud.py` (enum/"dropdown" values rejected, required fields, business rules incl.
-  **required-modifier enforcement**, and full CRUD lifecycle).
+  **required-modifier enforcement**, and full CRUD lifecycle), and `test_review_fixes.py` (cross-tenant
+  category rejected, negative/duplicate-option pricing rejected, delivery-zone active+min_order, fulfillment-
+  aware status machine, audited `changed_by`, duplicate-hours 422, pagination, input caps).
 - **When you add a tenant resource, add an isolation test** (an outsider must get 403). When you add pricing or
   status logic, assert the numbers/transitions.
 

@@ -6,7 +6,16 @@ from datetime import time
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, CheckConstraint, ForeignKey, Integer, Numeric, String, Time
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    ForeignKey,
+    Integer,
+    Numeric,
+    String,
+    Time,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin, UUIDMixin
@@ -19,6 +28,9 @@ class BusinessHours(UUIDMixin, Base):
     __tablename__ = "business_hours"
     __table_args__ = (
         CheckConstraint("day_of_week between 0 and 6", name="business_hours_dow"),
+        UniqueConstraint(
+            "business_id", "day_of_week", name="uq_business_hours_business_dow"
+        ),
     )
 
     business_id: Mapped[uuid.UUID] = mapped_column(

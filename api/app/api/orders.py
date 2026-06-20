@@ -1,0 +1,57 @@
+"""Order endpoints — list, create (server-priced), get, advance status."""
+from __future__ import annotations
+
+import uuid
+
+from fastapi import APIRouter, Query, status
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
+
+from app.core.deps import BusinessDep, DbSession
+from app.core.errors import BadRequestError
+from app.models.order import Order
+from app.schemas.order import OrderCreate, OrderOut, OrderStatusUpdate
+from app.services import order_service
+
+router = APIRouter(prefix="/businesses/{business_id}/orders", tags=["orders"])
+
+
+@router.get("", response_model=list[OrderOut])
+async def list_orders(
+    business: BusinessDep,
+    db: DbSession,
+    status_filter: str | None = Query(default=None, alias="status"),
+    fulfillment: str | None = Query(default=None),
+) -> list[Order]:
+    stmt = (
+        select(Order)
+        .where(Order.business_id == business.id)
+        .options(selectinload(Order.items), selectinload(Order.status_history))
+        .order_by(Order.created_at.desc())
+    )
+    if status_filter:
+        stmt = stmt.where(Order.status == status_filter)
+    if fulfillment:
+        stmt = stmt.where(Order.fulfillment == fulfillment)
+    rows = await db.execute(stmt)
+    return list(rows.scalars().all())
+
+
+@router.post("", response_model=OrderOut, status_code=status.HTTP_201_CREATED)
+async def create_order(data: OrderCreate, business: BusinessDep, db: DbSession) -> Order:
+    if not business.accepting_orders:
+        raise BadRequestError("This business is not accepting orders right now")
+    return await order_service.create_order(db, business, data)
+
+
+@router.get("/{order_id}", response_model=OrderOut)
+async def get_order(order_id: uuid.UUID, business: BusinessDep, db: DbSession) -> Order:
+    return await order_service.load_order(db, business.id, order_id)
+
+
+@router.patch("/{order_id}/status", response_model=OrderOut)
+async def update_order_status(
+    order_id: uuid.UUID, data: OrderStatusUpdate, business: BusinessDep, db: DbSession
+) -> Order:
+    order = await order_service.load_order(db, business.id, order_id)
+    return await order_service.update_status(db, order, data.status, data.changed_by)

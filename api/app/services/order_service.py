@@ -1,8 +1,8 @@
 """Order engine: server-side pricing, atomic order numbers, status transitions.
 
 Pricing is authoritative here — the line total is always
-``(product.price + Σ option deltas) × quantity`` computed from the DB, never trusted
-from the client.
+``(product.price + Σ effective option deltas) × quantity`` computed from the DB,
+never trusted from the client.
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from sqlalchemy.orm import selectinload
 from app.core.errors import BadRequestError, NotFoundError
 from app.models.business import Business
 from app.models.customer import Customer
-from app.models.menu import Product, ProductOptionGroup
+from app.models.menu import ModifierGroup, Product, ProductModifierGroup
 from app.models.order import Order, OrderItem, OrderStatusHistory
 from app.models.ops import DeliveryZone
 from app.schemas.order import OrderCreate
@@ -114,12 +114,19 @@ async def create_order(db: AsyncSession, business: Business, data: OrderCreate) 
         db, business.id, data.customer_phone, data.customer_name
     )
 
-    # Bulk-fetch every referenced product (with its modifiers) in one query.
+    # Bulk-fetch every referenced product (with its assigned modifiers) in one query.
     product_ids = {line.product_id for line in data.items}
     rows = await db.execute(
         select(Product)
         .where(Product.id.in_(product_ids), Product.business_id == business.id)
-        .options(selectinload(Product.option_groups).selectinload(ProductOptionGroup.items))
+        .options(
+            selectinload(Product.modifier_groups)
+            .selectinload(ProductModifierGroup.group)
+            .selectinload(ModifierGroup.items),
+            selectinload(Product.modifier_groups).selectinload(
+                ProductModifierGroup.option_prices
+            ),
+        )
     )
     products = {p.id: p for p in rows.scalars().all()}
 
@@ -135,35 +142,59 @@ async def create_order(db: AsyncSession, business: Business, data: OrderCreate) 
         if len(set(line.option_item_ids)) != len(line.option_item_ids):
             raise BadRequestError(f"Duplicate options selected for '{product.name}'")
 
-        # Validate the selected options against THIS product's own groups.
-        item_by_id = {i.id: i for g in product.option_groups for i in g.items}
-        group_of_item = {i.id: g for g in product.option_groups for i in g.items}
+        # An option is valid only when it is enabled on this product assignment.
+        item_by_id = {
+            item.id: item
+            for assignment in product.modifier_groups
+            for item in assignment.items
+        }
+        assignment_of_item = {
+            item.id: assignment
+            for assignment in product.modifier_groups
+            for item in assignment.items
+        }
         for oid in line.option_item_ids:
             if oid not in item_by_id:
                 raise BadRequestError(f"Invalid option selected for '{product.name}'")
 
         counts: dict = {}
         for oid in line.option_item_ids:
-            gid = group_of_item[oid].id
-            counts[gid] = counts.get(gid, 0) + 1
+            assignment_id = assignment_of_item[oid].id
+            counts[assignment_id] = counts.get(assignment_id, 0) + 1
 
-        for group in product.option_groups:
-            n = counts.get(group.id, 0)
-            floor = max(group.min_select, 1) if group.is_required else group.min_select
+        for assignment in product.modifier_groups:
+            n = counts.get(assignment.id, 0)
+            floor = (
+                max(assignment.min_select, 1)
+                if assignment.is_required
+                else assignment.min_select
+            )
             if n < floor:
-                raise BadRequestError(f"Please choose an option for '{group.name}'")
-            if group.max_select is not None and n > group.max_select:
-                raise BadRequestError(f"Too many options selected for '{group.name}'")
-            if group.select_type == "single" and n > 1:
-                raise BadRequestError(f"Only one option allowed for '{group.name}'")
+                raise BadRequestError(
+                    f"Please choose an option for '{assignment.group.display_name}'"
+                )
+            if assignment.max_select is not None and n > assignment.max_select:
+                raise BadRequestError(
+                    f"Too many options selected for '{assignment.group.display_name}'"
+                )
+            if assignment.group.select_type == "single" and n > 1:
+                raise BadRequestError(
+                    f"Only one option allowed for '{assignment.group.display_name}'"
+                )
 
         deltas = Decimal("0")
         options_snapshot: list[dict] = []
         for oid in line.option_item_ids:
             opt = item_by_id[oid]
-            deltas += opt.price_delta
+            price_delta = assignment_of_item[oid].price_delta_for(oid)
+            deltas += price_delta
             options_snapshot.append(
-                {"id": str(opt.id), "name": opt.name, "price_delta": str(opt.price_delta)}
+                {
+                    "id": str(opt.id),
+                    "name": opt.name,
+                    "description": opt.description,
+                    "price_delta": str(price_delta),
+                }
             )
 
         unit_price = product.price + deltas

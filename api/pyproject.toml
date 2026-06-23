@@ -13,6 +13,8 @@ dependencies = [
     "pydantic-settings>=2.5",
     "pyjwt>=2.9",
     "argon2-cffi>=23.1",
+    "cryptography>=49.0.0",
+    "httpx>=0.28.1",
 ]
 
 [dependency-groups]

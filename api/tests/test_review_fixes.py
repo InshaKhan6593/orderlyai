@@ -15,6 +15,16 @@ def _product(client, owner, biz, **body):
     ).json()
 
 
+def _modifier_group(client, owner, biz, **body):
+    base = {"name": "Options", "select_type": "single", "items": []}
+    base.update(body)
+    response = client.post(
+        f"/api/v1/businesses/{biz}/modifier-groups", json=base, headers=owner
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
 def _order(client, owner, biz, **body):
     base = {"customer_phone": "+923000000000", "fulfillment": "pickup", "items": []}
     base.update(body)
@@ -54,21 +64,23 @@ def test_product_rejects_foreign_category(client, business):
 # ── 2. Negative totals / duplicate options rejected ─────────────
 def test_negative_unit_price_rejected(client, business):
     owner, biz = business
+    group = _modifier_group(
+        client,
+        owner,
+        biz,
+        name="Discount",
+        items=[{"name": "Coupon", "price_delta": "-200"}],
+    )
     prod = _product(
         client,
         owner,
         biz,
         price="100",
-        option_groups=[
-            {
-                "name": "Discount",
-                "select_type": "single",
-                "is_required": False,
-                "items": [{"name": "Coupon", "price_delta": "-200"}],
-            }
+        modifier_groups=[
+            {"modifier_group_id": group["id"], "max_select": 1}
         ],
     )
-    coupon = prod["option_groups"][0]["items"][0]["id"]
+    coupon = group["items"][0]["id"]
     r = _order(
         client,
         owner,
@@ -80,21 +92,23 @@ def test_negative_unit_price_rejected(client, business):
 
 def test_duplicate_option_ids_rejected(client, business):
     owner, biz = business
+    group = _modifier_group(
+        client,
+        owner,
+        biz,
+        name="Add-ons",
+        select_type="multi",
+        items=[{"name": "Cheese", "price_delta": "50"}],
+    )
     prod = _product(
         client,
         owner,
         biz,
-        option_groups=[
-            {
-                "name": "Add-ons",
-                "select_type": "multi",
-                "is_required": False,
-                "max_select": 5,
-                "items": [{"name": "Cheese", "price_delta": "50"}],
-            }
+        modifier_groups=[
+            {"modifier_group_id": group["id"], "max_select": 5}
         ],
     )
-    cheese = prod["option_groups"][0]["items"][0]["id"]
+    cheese = group["items"][0]["id"]
     r = _order(
         client,
         owner,

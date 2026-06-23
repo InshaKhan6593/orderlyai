@@ -8,26 +8,31 @@ def _seed_burger(client, owner, biz):
     cat = client.post(
         f"/api/v1/businesses/{biz}/categories", json={"name": "Mains"}, headers=owner
     ).json()
+    group = client.post(
+        f"/api/v1/businesses/{biz}/modifier-groups",
+        json={
+            "name": "Size",
+            "select_type": "single",
+            "items": [
+                {"name": "Regular", "price_delta": "0", "is_default": True},
+                {"name": "Large", "price_delta": "250"},
+            ],
+        },
+        headers=owner,
+    ).json()
     prod = client.post(
         f"/api/v1/businesses/{biz}/products",
         json={
             "name": "Burger",
             "price": "850",
             "category_id": cat["id"],
-            "option_groups": [
-                {
-                    "name": "Size",
-                    "is_required": False,
-                    "items": [
-                        {"name": "Regular", "price_delta": "0", "is_default": True},
-                        {"name": "Large", "price_delta": "250"},
-                    ],
-                }
+            "modifier_groups": [
+                {"modifier_group_id": group["id"], "max_select": 1}
             ],
         },
         headers=owner,
     ).json()
-    large = next(i for g in prod["option_groups"] for i in g["items"] if i["name"] == "Large")
+    large = next(i for i in group["items"] if i["name"] == "Large")
     return prod, large
 
 

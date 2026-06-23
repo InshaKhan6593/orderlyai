@@ -29,6 +29,17 @@ class Settings(BaseSettings):
     # CORS
     cors_origins: str = "http://localhost:3000"
 
+    # Uploads
+    upload_dir: str = "uploads"
+    max_product_image_bytes: int = 2_000_000
+
+    # WhatsApp Cloud API
+    whatsapp_verify_token: str | None = None
+    # Meta App Secret — verifies the X-Hub-Signature-256 header on inbound webhooks.
+    whatsapp_app_secret: str | None = None
+    # Fernet key (urlsafe base64, 32 bytes) encrypting stored access tokens at rest.
+    whatsapp_token_encryption_key: str | None = None
+
     @property
     def cors_origins_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]

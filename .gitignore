@@ -10,6 +10,8 @@ __pycache__/
 .env
 .env.*
 !.env.example
+uploads/
+api/uploads/
 
 # Node / Next (frontend later)
 node_modules/

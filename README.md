@@ -3,9 +3,9 @@
 AI-powered WhatsApp ordering + CMS platform for small food businesses
 (restaurants, cafés, bakeries, home kitchens). Multi-tenant SaaS.
 
-> **Status:** Backend (CMS API) built and tested. Frontend, the LangGraph WhatsApp
-> agent, and billing come next. Design docs live in
-> `../inshakh/whatsapp-ordering-saas/`.
+> **Status:** Backend (CMS API) built and tested. Frontend (Next.js) is **in progress** in
+> `web/` with shadcn/ui, auth, and onboarding steps 1–6 including the backend-wired menu builder and AI assistant config. The LangGraph
+> WhatsApp agent and billing follow. Design docs live in `../inshakh/whatsapp-ordering-saas/`.
 
 ## Stack (current)
 
@@ -15,7 +15,7 @@ AI-powered WhatsApp ordering + CMS platform for small food businesses
 | Auth | **Self-managed JWT** (access + refresh) · argon2 password hashing |
 | Database | **PostgreSQL 16** in Docker |
 | Multi-tenancy | `business_id` on every row + app-layer scoping (`get_business` gate) |
-| Frontend | _to be built_ (Next.js) |
+| Frontend | **Next.js 16** (App Router, TS) · Tailwind v4 · **shadcn/ui** (Base UI) · pnpm — _in progress_ |
 
 ## Prerequisites
 - [Docker](https://www.docker.com/) (for Postgres)
@@ -49,11 +49,31 @@ Then open:
 > `api/.env` is pre-filled for local dev (`DEBUG=true`). `DEBUG` defaults to **false**
 > when unset — set a strong `JWT_SECRET` before deploying.
 
+## Run the frontend (web)
+
+The Next.js app lives in `web/` (App Router, Tailwind v4, shadcn/ui). It talks to the
+FastAPI backend above via `NEXT_PUBLIC_API_URL`.
+
+```bash
+cd web
+pnpm install
+cp .env.example .env.local     # points at http://localhost:8000/api/v1 by default
+pnpm dev                       # http://localhost:3000
+```
+
+Currently built: the brand design system, sign-in/sign-up flows, and onboarding through
+the backend-wired AI assistant setup. Business profile, fulfillment settings, menu data,
+and assistant config are wired to the API; hours remains client-side until the agent
+ordering phase. WhatsApp connection and dashboard screens are next.
+
+> **shadcn MCP:** `.mcp.json` registers the shadcn MCP server so an AI agent can browse and
+> add components. After it's approved, run `pnpm dlx shadcn@latest add <component>` from `web/`.
+
 ## Tests
 
 ```bash
 cd api
-uv run pytest            # 43 tests: auth, tenant isolation, validation, enums, CRUD,
+uv run pytest            # 65 tests: auth, tenant isolation, validation, enums, CRUD,
                          #           pricing/status, + security/correctness regressions
 uv run python smoke.py   # end-to-end smoke against the running DB
 ```
@@ -63,13 +83,19 @@ uv run python smoke.py   # end-to-end smoke against the running DB
 ```
 orderlyai/
 ├── AGENTS.md                   # working rules / source of truth for contributors
+├── .mcp.json                   # shadcn MCP server (project-scoped, for AI agents)
 ├── docker-compose.yml          # Postgres 16 (host :55432)
 ├── screens/                    # design mockups (onboarding + dashboard)
+├── web/                        # Next.js 16 frontend (App Router, Tailwind v4, shadcn/ui)
+│   └── src/
+│       ├── app/               # routes: / (landing), /login, layout, globals.css (theme)
+│       ├── components/        # ui/ (shadcn) + brand/ (logo)
+│       └── lib/               # utils (cn), api (backend base URL)
 └── api/
     ├── app/
     │   ├── main.py             # FastAPI app (CORS, error handlers, routers)
     │   ├── core/              # config, db, security (JWT/argon2), deps, errors
-    │   ├── models/            # SQLAlchemy 2.0 models (13 tables)
+    │   ├── models/            # SQLAlchemy 2.0 models (15 tables)
     │   ├── schemas/           # Pydantic request/response models
     │   ├── services/          # auth, business, order engine (pricing, status machine)
     │   └── api/               # routers: auth, businesses, categories, products,
@@ -85,8 +111,9 @@ orderlyai/
 |-------|-----------|
 | Auth | `POST /auth/register · /auth/login · /auth/refresh` · `GET /auth/me` |
 | Businesses | `POST/GET /businesses` · `GET/PATCH /businesses/{id}` |
-| Menu | `…/categories` (CRUD) · `…/products` (CRUD + nested modifiers) |
+| Menu | `…/categories` (CRUD) · `…/products` (CRUD + modifier assignments) · `…/modifier-groups` (reusable library CRUD) |
 | Ops | `…/hours` (GET/PUT) · `…/delivery-zones` (CRUD) |
+| Agent | `…/agent-config` (GET/PUT assistant setup) |
 | Customers | `…/customers` (read, paginated) |
 | Orders | `GET/POST …/orders` · `GET …/orders/{id}` · `PATCH …/orders/{id}/status` |
 

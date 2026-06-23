@@ -25,11 +25,11 @@ is one **tenant**). Target scale: 100–150+ business tenants.
 
 | Area | State |
 |------|-------|
-| **Backend CMS API** (`api/`) | ✅ Built, running, and tested (65 passing tests) |
+| **Backend CMS API** (`api/`) | ✅ Built, running, and tested (90 passing tests) |
 | Database (Postgres 16 in Docker) | ✅ Schema + Alembic migrations applied |
 | Auth (self-managed JWT) | ✅ Done |
 | **Frontend** (Next.js) | 🚧 In progress in `web/` (Next.js 16 + Tailwind v4 + shadcn/ui). Auth plus onboarding steps 1–6 are built; business profile, fulfillment, menu builder, and AI assistant config are wired to the API |
-| **WhatsApp AI agent** (LangGraph + Claude) | ❌ Not built yet — planned to live inside `api/` |
+| **WhatsApp AI agent** (LangChain v1 + Claude) | 🚧 Core agent built in `api/app/agent/` (graph, tenant-scoped tools, per-tenant prompt, middleware, Pydantic structured output) + tested. Not yet wired to the webhook/worker. See `docs/agent/ARCHITECTURE.md` |
 | WhatsApp Cloud API integration | ❌ Not built yet |
 | Billing (Stripe + `plan`/`subscription`) | ❌ Not built — schema is forward-compatible (`business.plan_code` exists) |
 

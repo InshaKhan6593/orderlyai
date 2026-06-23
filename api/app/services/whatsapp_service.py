@@ -46,19 +46,13 @@ def parse_incoming_message(payload: dict[str, Any]) -> dict[str, str] | None:
     }
 
 
-async def send_text(
-    *, phone_number_id: str, access_token: str, to: str, body: str
+async def _post_message(
+    *, phone_number_id: str, access_token: str, payload: dict[str, Any]
 ) -> bool:
-    """Send a plain-text WhatsApp message. Returns True on success (HTTP 2xx)."""
+    """POST one fully-formed message payload to the Graph API. True on HTTP 2xx."""
     url = f"{_GRAPH_BASE}/{phone_number_id}/messages"
-    payload = {
-        "messaging_product": "whatsapp",
-        "recipient_type": "individual",
-        "to": to,
-        "type": "text",
-        "text": {"body": body},
-    }
     headers = {"Authorization": f"Bearer {access_token}"}
+    to = payload.get("to", "?")
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(url, json=payload, headers=headers)
@@ -70,4 +64,37 @@ async def send_text(
             "WhatsApp send to %s failed (%s): %s", to, resp.status_code, resp.text
         )
         return False
+    return True
+
+
+async def send_text(
+    *, phone_number_id: str, access_token: str, to: str, body: str
+) -> bool:
+    """Send a plain-text WhatsApp message. Returns True on success (HTTP 2xx)."""
+    payload = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": to,
+        "type": "text",
+        "text": {"body": body},
+    }
+    return await _post_message(
+        phone_number_id=phone_number_id, access_token=access_token, payload=payload
+    )
+
+
+async def send_payloads(
+    *, phone_number_id: str, access_token: str, payloads: list[dict[str, Any]]
+) -> bool:
+    """Send pre-rendered Graph API payloads (e.g. from ``agent.whatsapp_render``) in order.
+
+    Sends each message sequentially (WhatsApp preserves order this way). Returns True only
+    if every message was accepted; stops on the first failure so we don't send a half reply.
+    """
+    for payload in payloads:
+        ok = await _post_message(
+            phone_number_id=phone_number_id, access_token=access_token, payload=payload
+        )
+        if not ok:
+            return False
     return True

@@ -1,0 +1,7 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "orderly_agent": "./app/agent/studio.py:graph"
+  },
+  "env": ".env"
+}

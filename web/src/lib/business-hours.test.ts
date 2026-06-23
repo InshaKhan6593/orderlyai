@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   addTimeSlot,
   applyMondayHours,
+  backendDowToWebIndex,
   createDefaultBusinessHours,
   formatTimeLabel,
   isBusinessHoursValid,
@@ -10,9 +11,12 @@ import {
   isTimeSlotValid,
   markWeekendClosed,
   removeTimeSlot,
+  scheduleFromHours,
   setDayOpen,
   TIME_OPTIONS,
+  toBusinessHoursPayload,
   updateTimeSlot,
+  webIndexToBackendDow,
 } from "@/lib/business-hours";
 
 describe("business hours schedule", () => {
@@ -104,5 +108,54 @@ describe("business hours schedule", () => {
     expect(isTimeSlotValid(schedule[0].slots[0])).toBe(false);
     expect(isOvernightSlot(schedule[0].slots[0])).toBe(false);
     expect(isBusinessHoursValid(schedule)).toBe(false);
+  });
+});
+
+describe("backend hours mapping", () => {
+  it("remaps Mon=0..Sun=6 (frontend) to Sun=0..Sat=6 (backend)", () => {
+    expect(webIndexToBackendDow(0)).toBe(1); // Monday
+    expect(webIndexToBackendDow(5)).toBe(6); // Saturday
+    expect(webIndexToBackendDow(6)).toBe(0); // Sunday
+    // round-trip
+    for (let i = 0; i < 7; i += 1) {
+      expect(backendDowToWebIndex(webIndexToBackendDow(i))).toBe(i);
+    }
+  });
+
+  it("builds a 7-day payload with weekend (Sat/Sun) closed on the right backend days", () => {
+    const schedule = markWeekendClosed(applyMondayHours(createDefaultBusinessHours()));
+    const { hours } = toBusinessHoursPayload(schedule);
+
+    expect(hours).toHaveLength(7);
+    const byDow = new Map(hours.map((h) => [h.day_of_week, h]));
+    // Saturday -> backend 6, Sunday -> backend 0 are closed.
+    expect(byDow.get(6)?.is_closed).toBe(true);
+    expect(byDow.get(0)?.is_closed).toBe(true);
+    // Monday (backend 1) open with Monday's window.
+    expect(byDow.get(1)).toMatchObject({
+      is_closed: false,
+      open_time: "09:00",
+      close_time: "22:00",
+    });
+  });
+
+  it("collapses a split-shift day to an envelope (earliest open .. latest close)", () => {
+    // Default Wednesday (web index 2) has 09:00-12:00 and 19:00-23:00.
+    const { hours } = toBusinessHoursPayload(createDefaultBusinessHours());
+    const wednesday = hours.find((h) => h.day_of_week === webIndexToBackendDow(2));
+    expect(wednesday).toMatchObject({ open_time: "09:00", close_time: "23:00" });
+  });
+
+  it("rebuilds the schedule from backend rows, trimming HH:MM:SS and honoring dow", () => {
+    const schedule = scheduleFromHours([
+      { day_of_week: 1, open_time: "10:00:00", close_time: "23:30:00", is_closed: false }, // Mon
+      { day_of_week: 0, open_time: null, close_time: null, is_closed: true }, // Sun
+    ]);
+    expect(schedule[0]).toMatchObject({
+      day: "Monday",
+      isOpen: true,
+      slots: [{ opensAt: "10:00", closesAt: "23:30" }],
+    });
+    expect(schedule[6]).toMatchObject({ day: "Sunday", isOpen: false });
   });
 });

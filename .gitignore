@@ -12,6 +12,7 @@ __pycache__/
 !.env.example
 uploads/
 api/uploads/
+api/.langgraph_api/
 
 # Node / Next (frontend later)
 node_modules/

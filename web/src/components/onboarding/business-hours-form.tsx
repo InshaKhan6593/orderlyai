@@ -2,7 +2,7 @@
 
 import { ArrowLeft, ArrowRight, Plus, Trash2 } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 
 import { OnboardingShell } from "@/components/onboarding/onboarding-shell";
@@ -30,7 +30,9 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
+import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
+import { ApiError } from "@/lib/auth";
 import {
   addTimeSlot,
   applyMondayHours,
@@ -38,15 +40,26 @@ import {
   isBusinessHoursValid,
   isOvernightSlot,
   isTimeSlotValid,
+  listBusinessHours,
   markWeekendClosed,
   removeTimeSlot,
+  saveBusinessHours,
+  scheduleFromHours,
   setDayOpen,
   TIME_OPTIONS,
   updateTimeSlot,
   type BusinessDayHours,
   type TimeSlot,
 } from "@/lib/business-hours";
+import { listBusinesses } from "@/lib/business-profile";
 import { saveOnboardingResumePath } from "@/lib/onboarding-progress";
+
+function accessTokenFromStorage(): string | null {
+  return (
+    window.localStorage.getItem("orderly.access_token") ??
+    window.sessionStorage.getItem("orderly.access_token")
+  );
+}
 
 type ScheduleRowProps = {
   day: BusinessDayHours;
@@ -188,24 +201,89 @@ function ScheduleRow({
 
 export function BusinessHoursForm() {
   const router = useRouter();
+  const [businessId, setBusinessId] = useState<string>();
+  const [timezone, setTimezone] = useState("Asia/Karachi");
   const [acceptingOrders, setAcceptingOrders] = useState(true);
   const [schedule, setSchedule] = useState(createDefaultBusinessHours);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isSaving, setIsSaving] = useState(false);
   const isValid = isBusinessHoursValid(schedule);
 
-  function handleContinue() {
+  useEffect(() => {
+    const accessToken = accessTokenFromStorage();
+    if (!accessToken) {
+      toast.error("Please sign in to continue.");
+      router.replace("/login");
+      return;
+    }
+
+    let active = true;
+    void listBusinesses(accessToken)
+      .then(async (businesses) => {
+        const business =
+          businesses.find((item) => item.status === "onboarding") ?? businesses[0];
+        if (!business) {
+          throw new ApiError("Complete your business profile first.", 400);
+        }
+        const rows = await listBusinessHours({ accessToken, businessId: business.id });
+        if (!active) return;
+        setBusinessId(business.id);
+        setTimezone(business.timezone);
+        setAcceptingOrders(business.accepting_orders);
+        if (rows.length > 0) setSchedule(scheduleFromHours(rows));
+      })
+      .catch((error: unknown) => {
+        if (!active) return;
+        if (error instanceof ApiError && error.status === 401) {
+          toast.error("Your session has expired. Please sign in again.");
+          router.replace("/login");
+          return;
+        }
+        toast.error(
+          error instanceof ApiError ? error.message : "We couldn't load your hours.",
+        );
+      })
+      .finally(() => {
+        if (active) setIsLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [router]);
+
+  async function persist(destination: string) {
     if (!isValid) {
       toast.error("Check your hours before continuing.", {
         description: "Opening and closing times must be different.",
       });
       return;
     }
-    saveOnboardingResumePath("/onboarding/fulfillment");
-    router.push("/onboarding/fulfillment");
-  }
 
-  function handleSaveExit() {
-    saveOnboardingResumePath(isValid ? "/onboarding/fulfillment" : "/onboarding/hours");
-    router.push("/login");
+    const accessToken = accessTokenFromStorage();
+    if (!accessToken || !businessId) {
+      toast.error("Complete your business profile before saving hours.");
+      router.replace(accessToken ? "/onboarding/business-profile" : "/login");
+      return;
+    }
+
+    setIsSaving(true);
+    try {
+      await saveBusinessHours({ accessToken, businessId, schedule, acceptingOrders });
+      saveOnboardingResumePath(
+        destination === "/login" ? "/onboarding/hours" : destination,
+      );
+      toast.success("Opening hours saved.");
+      router.push(destination);
+    } catch (error) {
+      toast.error(
+        error instanceof ApiError
+          ? error.message
+          : "Couldn't save your hours. Please try again.",
+      );
+    } finally {
+      setIsSaving(false);
+    }
   }
 
   function handleSlotChange(
@@ -225,7 +303,7 @@ export function BusinessHoursForm() {
       contentClassName={ONBOARDING_CONTENT_CLASS_NAME}
       mainClassName={ONBOARDING_MAIN_CLASS_NAME}
       footerClassName="w-full justify-between gap-3"
-      onSaveExit={handleSaveExit}
+      onSaveExit={() => void persist("/login")}
       footer={
         <>
           <Button
@@ -252,10 +330,11 @@ export function BusinessHoursForm() {
           <Button
             type="button"
             size="lg"
-            disabled={!isValid}
-            onClick={handleContinue}
+            disabled={isLoading || isSaving || !isValid}
+            onClick={() => void persist("/onboarding/fulfillment")}
             className="h-10 min-w-[136px]"
           >
+            {isSaving ? <Spinner data-icon="inline-start" /> : null}
             Continue
             <ArrowRight data-icon="inline-end" />
           </Button>
@@ -297,7 +376,7 @@ export function BusinessHoursForm() {
         <CardHeader className="gap-4 px-5 py-4 has-data-[slot=card-action]:grid-cols-1 lg:items-center lg:px-6 lg:has-data-[slot=card-action]:grid-cols-[minmax(0,1fr)_auto]">
           <div>
             <CardTitle className="font-sans text-lg">Weekly schedule</CardTitle>
-            <CardDescription className="mt-1">Timezone: Asia/Karachi</CardDescription>
+            <CardDescription className="mt-1">Timezone: {timezone}</CardDescription>
           </div>
           <CardAction className="col-start-1 row-start-auto row-span-1 flex flex-wrap gap-3 justify-self-start lg:col-start-2 lg:row-start-1 lg:row-span-2 lg:justify-self-end">
             <Button

@@ -1,3 +1,6 @@
+import { apiUrl } from "@/lib/api";
+import { ApiError } from "@/lib/auth";
+
 export type TimeSlot = {
   opensAt: string;
   closesAt: string;
@@ -146,4 +149,170 @@ export function isBusinessHoursValid(schedule: BusinessDayHours[]): boolean {
       !day.isOpen ||
       (day.slots.length > 0 && day.slots.every(isTimeSlotValid)),
   );
+}
+
+// --------------------------------------------------------------------------- //
+// Backend mapping + persistence
+//
+// IMPORTANT: the frontend DAYS array is 0=Monday..6=Sunday, but the backend
+// `business_hours.day_of_week` is 0=Sunday..6=Saturday. Always remap.
+// --------------------------------------------------------------------------- //
+export type BusinessHoursItem = {
+  day_of_week: number;
+  open_time: string | null;
+  close_time: string | null;
+  is_closed: boolean;
+};
+
+export type BusinessHoursPayload = { hours: BusinessHoursItem[] };
+
+type Fetcher = typeof fetch;
+
+export function webIndexToBackendDow(index: number): number {
+  return (index + 1) % 7; // Mon(0)->1, ... Sat(5)->6, Sun(6)->0
+}
+
+export function backendDowToWebIndex(dow: number): number {
+  return (dow + 6) % 7; // Sun(0)->6, Mon(1)->0, ... Sat(6)->5
+}
+
+function trimTime(value: string): string {
+  // Backend serializes time as "HH:MM:SS"; the UI selects use "HH:MM".
+  return value.slice(0, 5);
+}
+
+export function toBusinessHoursPayload(
+  schedule: BusinessDayHours[],
+): BusinessHoursPayload {
+  const hours = schedule.map((day, index) => {
+    const day_of_week = webIndexToBackendDow(index);
+    if (!day.isOpen || day.slots.length === 0) {
+      return { day_of_week, open_time: null, close_time: null, is_closed: true };
+    }
+    // The backend stores ONE window per day (UNIQUE business_id, day_of_week), so
+    // collapse multiple slots to an envelope (earliest open .. latest close).
+    // Split shifts are not representable yet.
+    return {
+      day_of_week,
+      open_time: day.slots[0].opensAt,
+      close_time: day.slots[day.slots.length - 1].closesAt,
+      is_closed: false,
+    };
+  });
+  return { hours };
+}
+
+export function scheduleFromHours(rows: BusinessHoursItem[]): BusinessDayHours[] {
+  const byWebIndex = new Map<number, BusinessHoursItem>();
+  for (const row of rows) byWebIndex.set(backendDowToWebIndex(row.day_of_week), row);
+
+  return createDefaultBusinessHours().map((day, index) => {
+    const row = byWebIndex.get(index);
+    if (!row) return day; // no saved row: keep the editable default
+    if (row.is_closed || !row.open_time || !row.close_time) {
+      return { ...day, isOpen: false };
+    }
+    return {
+      ...day,
+      isOpen: true,
+      slots: [{ opensAt: trimTime(row.open_time), closesAt: trimTime(row.close_time) }],
+    };
+  });
+}
+
+async function hoursRequest<T>({
+  path,
+  accessToken,
+  method = "GET",
+  body,
+  fetcher = fetch,
+}: {
+  path: string;
+  accessToken: string;
+  method?: "GET" | "PUT" | "PATCH";
+  body?: unknown;
+  fetcher?: Fetcher;
+}): Promise<T> {
+  let response: Response;
+  try {
+    response = await fetcher(apiUrl(path), {
+      method,
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+  } catch {
+    throw new ApiError(
+      "Couldn't reach the server. Is the API running on http://localhost:8000?",
+      0,
+    );
+  }
+
+  if (!response.ok) {
+    let message = "Couldn't save your opening hours. Please try again.";
+    let code: string | undefined;
+    try {
+      const payload = (await response.json()) as {
+        error?: { message?: string; code?: string };
+      };
+      message = payload.error?.message ?? message;
+      code = payload.error?.code;
+    } catch {
+      // Keep the stable fallback for non-JSON responses.
+    }
+    throw new ApiError(message, response.status, code);
+  }
+
+  if (response.status === 204) return undefined as T;
+  return (await response.json()) as T;
+}
+
+export function listBusinessHours({
+  accessToken,
+  businessId,
+  fetcher = fetch,
+}: {
+  accessToken: string;
+  businessId: string;
+  fetcher?: Fetcher;
+}): Promise<BusinessHoursItem[]> {
+  return hoursRequest<BusinessHoursItem[]>({
+    path: `/businesses/${businessId}/hours`,
+    accessToken,
+    fetcher,
+  });
+}
+
+export async function saveBusinessHours({
+  accessToken,
+  businessId,
+  schedule,
+  acceptingOrders,
+  fetcher = fetch,
+}: {
+  accessToken: string;
+  businessId: string;
+  schedule: BusinessDayHours[];
+  acceptingOrders: boolean;
+  fetcher?: Fetcher;
+}): Promise<void> {
+  await Promise.all([
+    hoursRequest({
+      path: `/businesses/${businessId}/hours`,
+      accessToken,
+      method: "PUT",
+      body: toBusinessHoursPayload(schedule),
+      fetcher,
+    }),
+    // The "Accepting orders now" toggle lives on this screen but maps to the business.
+    hoursRequest({
+      path: `/businesses/${businessId}`,
+      accessToken,
+      method: "PATCH",
+      body: { accepting_orders: acceptingOrders },
+      fetcher,
+    }),
+  ]);
 }

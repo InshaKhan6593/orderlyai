@@ -241,10 +241,10 @@ export function DashboardSettingsPage() {
             </p>
           </section>
 
-          <Card className="rounded-lg py-0 shadow-sm">
-            <CardContent className="grid min-h-[560px] p-0 lg:grid-cols-[208px_minmax(0,1fr)]">
-              <aside className="border-b border-border p-3 lg:border-r lg:border-b-0">
-                <nav className="flex flex-col gap-1">
+          <div className="grid gap-4 lg:grid-cols-[208px_minmax(0,1fr)] lg:items-start">
+            <Card className="flex max-h-[calc(100vh-6rem)] flex-col self-start overflow-hidden rounded-lg py-0 shadow-sm lg:sticky lg:top-20">
+              <CardContent className="flex min-h-0 flex-1 flex-col p-3">
+                <nav className="flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto pr-1 [scrollbar-color:var(--muted-foreground)_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-muted-foreground/40 [&::-webkit-scrollbar-track]:bg-transparent">
                   {SETTINGS_TABS.map((tab) => {
                     const Icon = tab.icon;
                     const isActive = tab.id === activeTab;
@@ -285,9 +285,11 @@ export function DashboardSettingsPage() {
                     );
                   })}
                 </nav>
-              </aside>
+              </CardContent>
+            </Card>
 
-              <section className="p-5">
+            <Card className="rounded-lg py-0 shadow-sm">
+              <CardContent className="p-5">
                 <div className="mb-5">
                   <h3 className="font-heading text-xl font-medium text-foreground">
                     {active.title}
@@ -296,9 +298,9 @@ export function DashboardSettingsPage() {
                 </div>
 
                 {renderActiveTab()}
-              </section>
-            </CardContent>
-          </Card>
+              </CardContent>
+            </Card>
+          </div>
         </div>
       )}
     </DashboardShell>

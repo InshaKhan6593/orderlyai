@@ -9,7 +9,6 @@ import {
   List,
   MessageCircle,
   Search,
-  ShoppingBag,
   Volume2,
   X,
 } from "lucide-react";
@@ -29,6 +28,13 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
+import {
+  Sheet,
+  SheetClose,
+  SheetContent,
+  SheetDescription,
+  SheetTitle,
+} from "@/components/ui/sheet";
 import { Spinner } from "@/components/ui/spinner";
 import { ApiError } from "@/lib/auth";
 import {
@@ -224,58 +230,51 @@ function BoardColumnView({
   );
 }
 
-function OrderDetail({
+function OrderDetailSheet({
   order,
-  onClose,
+  open,
+  onOpenChange,
   onAdvance,
 }: {
   order: DashboardOrder | null;
-  onClose: () => void;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
   onAdvance: (order: DashboardOrder, status: DashboardOrderStatus) => void;
 }) {
-  if (!order) {
-    return (
-      <aside className="hidden border-l border-border bg-card xl:grid xl:place-items-center">
-        <div className="px-8 text-center">
-          <ShoppingBag className="mx-auto size-10 text-muted-foreground" />
-          <p className="mt-3 font-medium text-foreground">Select an order</p>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Order details and actions will appear here.
-          </p>
-        </div>
-      </aside>
-    );
-  }
-
-  const primary = nextPrimaryOrderAction(order);
-  const secondary = secondaryOrderAction(order);
-  const fulfillment = fulfillmentBadge(order);
+  const primary = order ? nextPrimaryOrderAction(order) : null;
+  const secondary = order ? secondaryOrderAction(order) : null;
+  const fulfillment = order ? fulfillmentBadge(order) : null;
 
   return (
-    <aside className="border-l border-border bg-card xl:min-h-[calc(100vh-64px)]">
-      <div className="sticky top-16 flex max-h-[calc(100vh-64px)] flex-col overflow-y-auto">
-        <div className="flex min-h-[70px] items-center gap-3 border-b border-border px-5">
-          <h2 className="font-heading text-xl font-medium text-foreground">
-            Order #{order.order_no}
-          </h2>
-          <Badge variant="outline" className={statusBadgeClass(order.status)}>
-            {statusLabel(order.status)}
-          </Badge>
-          <Badge variant="outline" className={fulfillment.className}>
-            {fulfillment.label}
-          </Badge>
-          <button
-            type="button"
-            className="ml-auto grid size-8 place-items-center rounded-lg hover:bg-muted"
-            onClick={onClose}
-            aria-label="Close order detail"
-          >
-            <X className="size-5" />
-          </button>
-        </div>
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent showCloseButton={false} className="gap-0 p-0">
+        {order ? (
+          <>
+            <div className="flex min-h-[70px] items-center gap-3 border-b border-border px-5">
+              <SheetTitle className="text-xl font-medium">
+                Order #{order.order_no}
+              </SheetTitle>
+              <SheetDescription className="sr-only">
+                Order details, customer, and fulfillment actions.
+              </SheetDescription>
+              <Badge variant="outline" className={statusBadgeClass(order.status)}>
+                {statusLabel(order.status)}
+              </Badge>
+              {fulfillment ? (
+                <Badge variant="outline" className={fulfillment.className}>
+                  {fulfillment.label}
+                </Badge>
+              ) : null}
+              <SheetClose
+                className="ml-auto grid size-8 place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                aria-label="Close order detail"
+              >
+                <X className="size-5" />
+              </SheetClose>
+            </div>
 
-        <div className="flex flex-col gap-5 p-5">
-          <section>
+            <div className="flex flex-1 flex-col gap-5 overflow-y-auto p-5 [scrollbar-color:var(--muted-foreground)_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-button]:hidden [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-muted-foreground/40 [&::-webkit-scrollbar-track]:bg-transparent">
+              <section>
             <h3 className="text-base font-semibold text-foreground">Items</h3>
             <div className="mt-3 flex flex-col gap-4">
               {order.items.map((item) => (
@@ -372,43 +371,60 @@ function OrderDetail({
 
           <section>
             <h3 className="text-base font-semibold text-foreground">Order timeline</h3>
-            <div className="mt-3 flex flex-col gap-3">
-              {order.status_history.map((entry) => (
-                <div key={entry.id} className="grid grid-cols-[12px_minmax(0,1fr)] gap-3">
-                  <span className="mt-1 size-2.5 rounded-full bg-primary" />
-                  <p className="text-sm text-muted-foreground">
-                    {statusLabel(entry.status)} -{" "}
-                    {new Intl.DateTimeFormat("en-US", {
-                      hour: "numeric",
-                      minute: "2-digit",
-                    }).format(new Date(entry.created_at))}
-                  </p>
-                </div>
+            <ol className="mt-3">
+              {order.status_history.map((entry, index) => (
+                <li key={entry.id} className="relative flex gap-3 pb-4 last:pb-0">
+                  {index < order.status_history.length - 1 ? (
+                    <span
+                      className="absolute top-2.5 left-[5px] h-full w-px -translate-x-1/2 bg-border"
+                      aria-hidden="true"
+                    />
+                  ) : null}
+                  <span className="relative z-10 mt-1.5 size-2.5 shrink-0 rounded-full bg-primary ring-4 ring-card" />
+                  <div className="flex min-w-0 flex-1 items-baseline justify-between gap-3">
+                    <p className="text-sm font-medium text-foreground">
+                      {statusLabel(entry.status)}
+                    </p>
+                    <p className="shrink-0 text-xs text-muted-foreground">
+                      {new Intl.DateTimeFormat("en-US", {
+                        hour: "numeric",
+                        minute: "2-digit",
+                      }).format(new Date(entry.created_at))}
+                    </p>
+                  </div>
+                </li>
               ))}
-            </div>
+            </ol>
           </section>
-        </div>
+            </div>
 
-        {primary || secondary ? (
-          <div className="mt-auto grid grid-cols-2 gap-4 border-t border-border p-5">
-            {primary ? (
-              <Button className="h-12" onClick={() => onAdvance(order, primary.status)}>
-                {primary.label === "Accept" ? "Accept order" : primary.label}
-              </Button>
-            ) : null}
-            {secondary ? (
-              <Button
-                variant="destructive"
-                className="h-12 border border-destructive/70 bg-background"
-                onClick={() => onAdvance(order, secondary.status)}
+            {primary || secondary ? (
+              <div
+                className={cn(
+                  "grid gap-4 border-t border-border p-5",
+                  primary && secondary ? "grid-cols-2" : "grid-cols-1",
+                )}
               >
-                {secondary.label}
-              </Button>
+                {primary ? (
+                  <Button className="h-12" onClick={() => onAdvance(order, primary.status)}>
+                    {primary.label === "Accept" ? "Accept order" : primary.label}
+                  </Button>
+                ) : null}
+                {secondary ? (
+                  <Button
+                    variant="destructive"
+                    className="h-12 border border-destructive/70 bg-background"
+                    onClick={() => onAdvance(order, secondary.status)}
+                  >
+                    {secondary.label}
+                  </Button>
+                ) : null}
+              </div>
             ) : null}
-          </div>
+          </>
         ) : null}
-      </div>
-    </aside>
+      </SheetContent>
+    </Sheet>
   );
 }
 
@@ -418,6 +434,9 @@ export function DashboardOrdersPage() {
   const [business, setBusiness] = useState<Business | null>(null);
   const [orders, setOrders] = useState<DashboardOrder[]>([]);
   const [selectedOrderId, setSelectedOrderId] = useState<string>();
+  // Order shown in the detail sheet. Kept as its own state (set from event
+  // handlers) so it survives the close animation after the selection clears.
+  const [detailOrder, setDetailOrder] = useState<DashboardOrder | null>(null);
   const [search, setSearch] = useState("");
   const [fulfillment, setFulfillment] = useState("all");
   const [isLoading, setIsLoading] = useState(true);
@@ -446,7 +465,6 @@ export function DashboardOrdersPage() {
         setAccessToken(token);
         setBusiness(selected);
         setOrders(loadedOrders);
-        setSelectedOrderId(loadedOrders[0]?.id);
       } catch (error) {
         if (!active) return;
         if (error instanceof ApiError && error.status === 401) {
@@ -479,8 +497,9 @@ export function DashboardOrdersPage() {
     });
   }, [fulfillment, orders, search]);
   const columns = groupOrdersForBoard(filteredOrders);
-  const selectedOrder =
-    orders.find((order) => order.id === selectedOrderId) ?? filteredOrders[0] ?? null;
+  const selectedOrder = selectedOrderId
+    ? orders.find((order) => order.id === selectedOrderId) ?? null
+    : null;
 
   async function handleAcceptingOrders(checked: boolean) {
     if (!accessToken || !business) return;
@@ -515,7 +534,11 @@ export function DashboardOrdersPage() {
       setOrders((current) =>
         current.map((item) => (item.id === updated.id ? updated : item)),
       );
-      setSelectedOrderId(updated.id);
+      // Keep the open detail sheet in sync without forcing it open from a
+      // board-card action.
+      setDetailOrder((current) =>
+        current && current.id === updated.id ? updated : current,
+      );
       toast.success(`Order #${updated.order_no} updated.`);
     } catch (error) {
       toast.error(
@@ -540,80 +563,85 @@ export function DashboardOrdersPage() {
           <Spinner />
         </div>
       ) : (
-        <div className="grid gap-0 xl:grid-cols-[minmax(0,1fr)_392px]">
-          <div className="min-w-0 pr-0 xl:pr-6">
-            <div className="mb-5 flex flex-wrap items-center gap-3">
-              <Button variant="outline" className="h-11 min-w-[140px] justify-between">
-                <CalendarDays data-icon="inline-start" />
-                Today
+        <>
+          <div className="mb-5 flex flex-wrap items-center gap-3">
+            <Button variant="outline" className="h-11 min-w-[140px] justify-between">
+              <CalendarDays data-icon="inline-start" />
+              Today
+            </Button>
+            <Select value={fulfillment} onValueChange={(value) => setFulfillment(value ?? "all")}>
+              <SelectTrigger className="h-11 w-[190px]">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent alignItemWithTrigger={false}>
+                <SelectGroup>
+                  <SelectItem value="all">All fulfillment</SelectItem>
+                  <SelectItem value="delivery">Delivery</SelectItem>
+                  <SelectItem value="pickup">Pickup</SelectItem>
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+            <div className="relative min-w-[260px] flex-1 max-w-[320px]">
+              <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder="Search orders..."
+                className="h-11 pl-9"
+              />
+            </div>
+            <div className="ml-auto flex items-center gap-2">
+              <Button variant="outline" size="icon-lg" aria-label="Board view">
+                <Grid2X2 />
               </Button>
-              <Select value={fulfillment} onValueChange={(value) => setFulfillment(value ?? "all")}>
-                <SelectTrigger className="h-11 w-[190px]">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent alignItemWithTrigger={false}>
-                  <SelectGroup>
-                    <SelectItem value="all">All fulfillment</SelectItem>
-                    <SelectItem value="delivery">Delivery</SelectItem>
-                    <SelectItem value="pickup">Pickup</SelectItem>
-                  </SelectGroup>
-                </SelectContent>
-              </Select>
-              <div className="relative min-w-[260px] flex-1 max-w-[320px]">
-                <Search className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground" />
-                <Input
-                  value={search}
-                  onChange={(event) => setSearch(event.target.value)}
-                  placeholder="Search orders..."
-                  className="h-11 pl-9"
-                />
-              </div>
-              <div className="ml-auto flex items-center gap-2">
-                <Button variant="outline" size="icon-lg" aria-label="Board view">
-                  <Grid2X2 />
-                </Button>
-                <Button variant="outline" size="icon-lg" aria-label="List view">
-                  <List />
-                </Button>
-                <Button variant="outline" className="h-11">
-                  <Volume2 data-icon="inline-start" />
-                  Sound on
-                </Button>
-              </div>
+              <Button variant="outline" size="icon-lg" aria-label="List view">
+                <List />
+              </Button>
+              <Button variant="outline" className="h-11">
+                <Volume2 data-icon="inline-start" />
+                Sound on
+              </Button>
             </div>
-
-            <div className="grid gap-3 lg:grid-cols-5">
-              {columns.map((column) => (
-                <BoardColumnView
-                  key={column.key}
-                  column={column}
-                  selectedOrderId={selectedOrder?.id}
-                  onSelect={(order) => setSelectedOrderId(order.id)}
-                  onAdvance={(order, status) => void handleAdvance(order, status)}
-                />
-              ))}
-            </div>
-
-            {filteredOrders.length === 0 ? (
-              <Card className="mt-4 rounded-lg py-0">
-                <CardContent className="grid min-h-[180px] place-items-center p-6 text-center">
-                  <div>
-                    <Bell className="mx-auto size-8 text-muted-foreground" />
-                    <p className="mt-3 font-medium text-foreground">No orders found</p>
-                    <p className="mt-1 text-sm text-muted-foreground">
-                      New WhatsApp orders will appear here.
-                    </p>
-                  </div>
-                </CardContent>
-              </Card>
-            ) : null}
           </div>
-          <OrderDetail
-            order={selectedOrder}
-            onClose={() => setSelectedOrderId(undefined)}
+
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
+            {columns.map((column) => (
+              <BoardColumnView
+                key={column.key}
+                column={column}
+                selectedOrderId={selectedOrder?.id}
+                onSelect={(order) => {
+                  setSelectedOrderId(order.id);
+                  setDetailOrder(order);
+                }}
+                onAdvance={(order, status) => void handleAdvance(order, status)}
+              />
+            ))}
+          </div>
+
+          {filteredOrders.length === 0 ? (
+            <Card className="mt-4 rounded-lg py-0">
+              <CardContent className="grid min-h-[180px] place-items-center p-6 text-center">
+                <div>
+                  <Bell className="mx-auto size-8 text-muted-foreground" />
+                  <p className="mt-3 font-medium text-foreground">No orders found</p>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    New WhatsApp orders will appear here.
+                  </p>
+                </div>
+              </CardContent>
+            </Card>
+          ) : null}
+
+          <OrderDetailSheet
+            order={detailOrder}
+            open={Boolean(selectedOrderId)}
+            onOpenChange={(open) => {
+              if (!open) setSelectedOrderId(undefined);
+            }}
             onAdvance={(order, status) => void handleAdvance(order, status)}
           />
-        </div>
+        </>
       )}
     </DashboardShell>
   );

@@ -657,8 +657,8 @@ export function DashboardMenuPage() {
           </section>
 
           <div className="grid min-h-[560px] gap-4 lg:grid-cols-[200px_minmax(0,1fr)]">
-            <Card className="rounded-lg py-0 shadow-sm">
-              <CardContent className="p-3">
+            <Card className="flex max-h-[calc(100vh-11rem)] flex-col self-start overflow-hidden rounded-lg py-0 shadow-sm lg:sticky lg:top-20">
+              <CardContent className="flex min-h-0 flex-1 flex-col p-3">
                 <h3 className="mb-2 px-2.5 text-base font-semibold text-foreground">
                   Categories
                 </h3>
@@ -668,7 +668,7 @@ export function DashboardMenuPage() {
                     No categories yet
                   </p>
                 ) : (
-                  <div className="flex flex-col gap-0.5">
+                  <div className="-mr-1.5 flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto pr-2.5 [scrollbar-color:var(--muted-foreground)_transparent] [scrollbar-width:thin] [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-muted-foreground/40 [&::-webkit-scrollbar-track]:bg-transparent">
                     <button
                       type="button"
                       onClick={() => setSelectedCategoryId("")}
@@ -797,7 +797,7 @@ export function DashboardMenuPage() {
                   variant="outline"
                   size="lg"
                   onClick={handleAddCategory}
-                  className="mt-3 h-10 w-full"
+                  className="mt-3 h-10 w-full shrink-0"
                 >
                   <Plus data-icon="inline-start" />
                   Add category

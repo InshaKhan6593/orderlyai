@@ -41,7 +41,11 @@ import {
   type AgentConfigOut,
   type AgentConfigValues,
 } from "@/lib/ai-assistant";
-import { ApiError } from "@/lib/auth";
+import { ApiError, clearTokens } from "@/lib/auth";
+import {
+  pickBusinessForOwner,
+  saveSelectedBusinessId,
+} from "@/lib/business-selection";
 import { listBusinesses, type Business } from "@/lib/business-profile";
 import { saveOnboardingResumePath } from "@/lib/onboarding-progress";
 
@@ -55,6 +59,8 @@ type AIAssistantInitialState = {
 
 type AIAssistantFormProps = {
   initialState?: AIAssistantInitialState;
+  variant?: "onboarding" | "settings";
+  onSaved?: () => void;
 };
 
 function accessTokenFromStorage(): string | null {
@@ -84,8 +90,13 @@ function PreviewBubble({
   );
 }
 
-export function AIAssistantForm({ initialState }: AIAssistantFormProps) {
+export function AIAssistantForm({
+  initialState,
+  variant = "onboarding",
+  onSaved,
+}: AIAssistantFormProps) {
   const router = useRouter();
+  const isSettings = variant === "settings";
   const [accessToken, setAccessToken] = useState(initialState?.accessToken ?? "");
   const [business, setBusiness] = useState<AssistantBusiness | null>(
     initialState?.business ?? null,
@@ -116,11 +127,11 @@ export function AIAssistantForm({ initialState }: AIAssistantFormProps) {
     let active = true;
     void listBusinesses(token)
       .then(async (businesses) => {
-        const selected =
-          businesses.find((item) => item.status === "onboarding") ?? businesses[0];
+        const selected = pickBusinessForOwner(businesses);
         if (!selected) {
           throw new ApiError("Complete your business profile first.", 400);
         }
+        saveSelectedBusinessId(selected.id);
         const config = await getAgentConfig({
           accessToken: token,
           businessId: selected.id,
@@ -158,7 +169,8 @@ export function AIAssistantForm({ initialState }: AIAssistantFormProps) {
 
   function handleSaveExit() {
     saveOnboardingResumePath("/onboarding/assistant");
-    router.push("/login");
+    clearTokens();
+    router.replace("/login");
   }
 
   async function persist(nextPath: string) {
@@ -178,6 +190,7 @@ export function AIAssistantForm({ initialState }: AIAssistantFormProps) {
         businessId: business.id,
         values,
       });
+      saveSelectedBusinessId(business.id);
       saveOnboardingResumePath(nextPath);
       router.push(nextPath);
     } catch (error) {
@@ -194,62 +207,41 @@ export function AIAssistantForm({ initialState }: AIAssistantFormProps) {
   const businessName = business?.name ?? "your business";
   const greeting = values.greetingMessage.trim();
 
-  return (
-    <OnboardingShell
-      currentStep={6}
-      contentClassName={ONBOARDING_CONTENT_CLASS_NAME}
-      mainClassName={ONBOARDING_MAIN_CLASS_NAME}
-      footerClassName="w-full justify-between gap-3"
-      onSaveExit={handleSaveExit}
-      footer={
-        <>
-          <Button
-            type="button"
-            variant="outline"
-            size="lg"
-            onClick={() => router.push("/onboarding/menu")}
-            className="h-10 min-w-[104px]"
-          >
-            <ArrowLeft data-icon="inline-start" />
-            Back
-          </Button>
-          <Button
-            type="button"
-            variant="link"
-            size="lg"
-            onClick={() => {
-              saveOnboardingResumePath("/onboarding/assistant");
-              router.push("/onboarding/whatsapp");
-            }}
-          >
-            Skip for now
-          </Button>
-          <Button
-            type="button"
-            size="lg"
-            disabled={isLoading || isSaving}
-            onClick={() => void persist("/onboarding/whatsapp")}
-            className="h-10 min-w-[136px]"
-          >
-            {isSaving ? <Spinner data-icon="inline-start" /> : null}
-            Continue
-            <ArrowRight data-icon="inline-end" />
-          </Button>
-        </>
+  async function handleSettingsSave() {
+    if (!business || !accessToken) {
+      toast.error("Assistant settings are still loading. Try again in a moment.");
+      return;
+    }
+    if (!values.greetingMessage.trim()) {
+      setShowErrors(true);
+      toast.error("Add a greeting message before saving.");
+      return;
+    }
+    setIsSaving(true);
+    try {
+      await saveAgentConfig({ accessToken, businessId: business.id, values });
+      saveSelectedBusinessId(business.id);
+      onSaved?.();
+      toast.success("Assistant settings saved.");
+    } catch (error) {
+      toast.error(
+        error instanceof ApiError
+          ? error.message
+          : "Couldn't save your assistant settings.",
+      );
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  const content = (
+    <div
+      className={
+        isSettings
+          ? "grid gap-4 lg:grid-cols-[1.05fr_0.95fr]"
+          : "mt-3 grid gap-4 lg:grid-cols-[1.05fr_0.95fr]"
       }
     >
-      <OnboardingStepHeader
-        stepLabel="Step 6 of 8"
-        title="Set up your WhatsApp assistant"
-        subtitle="Customize how your AI replies to customers on WhatsApp."
-      />
-      <div className="mt-2 flex justify-center">
-        <Badge variant="outline" className="h-7 border-border bg-background px-3 text-muted-foreground">
-          You can finish this later
-        </Badge>
-      </div>
-
-      <div className="mt-3 grid gap-4 lg:grid-cols-[1.05fr_0.95fr]">
         <OnboardingCard>
           <CardHeader className="px-5 py-4 lg:px-6">
             <CardTitle className="font-sans text-lg">Assistant settings</CardTitle>
@@ -402,7 +394,83 @@ export function AIAssistantForm({ initialState }: AIAssistantFormProps) {
             </div>
           </CardContent>
         </OnboardingCard>
+    </div>
+  );
+
+  if (isSettings) {
+    return (
+      <div className="flex flex-col">
+        {content}
+        <div className="mt-6 flex items-center justify-end border-t border-border pt-4">
+          <Button
+            type="button"
+            onClick={() => void handleSettingsSave()}
+            disabled={isLoading || isSaving}
+            className="h-10 min-w-[150px]"
+          >
+            {isSaving ? <Spinner data-icon="inline-start" /> : null}
+            Save changes
+          </Button>
+        </div>
       </div>
+    );
+  }
+
+  return (
+    <OnboardingShell
+      currentStep={6}
+      contentClassName={ONBOARDING_CONTENT_CLASS_NAME}
+      mainClassName={ONBOARDING_MAIN_CLASS_NAME}
+      footerClassName="w-full justify-between gap-3"
+      onSaveExit={handleSaveExit}
+      footer={
+        <>
+          <Button
+            type="button"
+            variant="outline"
+            size="lg"
+            onClick={() => router.push("/onboarding/menu")}
+            className="h-10 min-w-[104px]"
+          >
+            <ArrowLeft data-icon="inline-start" />
+            Back
+          </Button>
+          <Button
+            type="button"
+            variant="link"
+            size="lg"
+            onClick={() => {
+              saveOnboardingResumePath("/onboarding/assistant");
+              router.push("/onboarding/whatsapp");
+            }}
+          >
+            Skip for now
+          </Button>
+          <Button
+            type="button"
+            size="lg"
+            disabled={isLoading || isSaving}
+            onClick={() => void persist("/onboarding/whatsapp")}
+            className="h-10 min-w-[136px]"
+          >
+            {isSaving ? <Spinner data-icon="inline-start" /> : null}
+            Continue
+            <ArrowRight data-icon="inline-end" />
+          </Button>
+        </>
+      }
+    >
+      <OnboardingStepHeader
+        stepLabel="Step 6 of 8"
+        title="Set up your WhatsApp assistant"
+        subtitle="Customize how your AI replies to customers on WhatsApp."
+      />
+      <div className="mt-2 flex justify-center">
+        <Badge variant="outline" className="h-7 border-border bg-background px-3 text-muted-foreground">
+          You can finish this later
+        </Badge>
+      </div>
+      {content}
     </OnboardingShell>
   );
 }

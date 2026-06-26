@@ -40,7 +40,11 @@ import {
   InputGroupInput,
 } from "@/components/ui/input-group";
 import { Spinner } from "@/components/ui/spinner";
-import { ApiError } from "@/lib/auth";
+import { ApiError, clearTokens } from "@/lib/auth";
+import {
+  pickBusinessForOwner,
+  saveSelectedBusinessId,
+} from "@/lib/business-selection";
 import { listBusinesses, type Business } from "@/lib/business-profile";
 import { saveOnboardingResumePath } from "@/lib/onboarding-progress";
 import {
@@ -61,6 +65,8 @@ type WhatsAppConnectionInitialState = {
 
 type WhatsAppConnectionFormProps = {
   initialState?: WhatsAppConnectionInitialState;
+  variant?: "onboarding" | "settings";
+  onSaved?: () => void;
 };
 
 function accessTokenFromStorage(): string | null {
@@ -76,8 +82,11 @@ function isBlank(value: string): boolean {
 
 export function WhatsAppConnectionForm({
   initialState,
+  variant = "onboarding",
+  onSaved,
 }: WhatsAppConnectionFormProps) {
   const router = useRouter();
+  const isSettings = variant === "settings";
   const [accessToken, setAccessToken] = useState(initialState?.accessToken ?? "");
   const [business, setBusiness] = useState<WhatsAppBusiness | null>(
     initialState?.business ?? null,
@@ -105,11 +114,11 @@ export function WhatsAppConnectionForm({
     let active = true;
     void listBusinesses(token)
       .then(async (businesses) => {
-        const selected =
-          businesses.find((item) => item.status === "onboarding") ?? businesses[0];
+        const selected = pickBusinessForOwner(businesses);
         if (!selected) {
           throw new ApiError("Complete your business profile first.", 400);
         }
+        saveSelectedBusinessId(selected.id);
         const saved = await getWhatsAppConnection({
           accessToken: token,
           businessId: selected.id,
@@ -148,7 +157,8 @@ export function WhatsAppConnectionForm({
 
   function handleSaveExit() {
     saveOnboardingResumePath("/onboarding/whatsapp");
-    router.push("/login");
+    clearTokens();
+    router.replace("/login");
   }
 
   const hasSavedToken = connection?.has_access_token ?? false;
@@ -176,12 +186,14 @@ export function WhatsAppConnectionForm({
         businessId: business.id,
         values,
       });
+      saveSelectedBusinessId(business.id);
       setConnection(saved);
       setValues(createWhatsAppConnectionValues(saved));
       saveOnboardingResumePath(nextPath ?? "/onboarding/whatsapp");
       if (nextPath) {
         router.push(nextPath);
       } else {
+        onSaved?.();
         toast.success("WhatsApp test connection saved.");
       }
     } catch (error) {
@@ -195,62 +207,8 @@ export function WhatsAppConnectionForm({
     }
   }
 
-  return (
-    <OnboardingShell
-      currentStep={7}
-      contentClassName={ONBOARDING_CONTENT_CLASS_NAME}
-      mainClassName={ONBOARDING_MAIN_CLASS_NAME}
-      footerClassName="grid w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2"
-      onSaveExit={handleSaveExit}
-      footer={
-        <>
-          <Button
-            type="button"
-            variant="outline"
-            size="lg"
-            onClick={() => router.push("/onboarding/assistant")}
-            className="h-10 min-w-[104px]"
-          >
-            <ArrowLeft data-icon="inline-start" />
-            Back
-          </Button>
-          <Button
-            type="button"
-            variant="link"
-            size="lg"
-            onClick={() => {
-              saveOnboardingResumePath("/onboarding/whatsapp");
-              router.push("/onboarding/review");
-            }}
-          >
-            Skip for now
-          </Button>
-          <Button
-            type="button"
-            size="lg"
-            disabled={isLoading || isSaving}
-            onClick={() => void persist("/onboarding/review")}
-            className="h-10 min-w-[136px]"
-          >
-            {isSaving ? <Spinner data-icon="inline-start" /> : null}
-            Continue
-            <ArrowRight data-icon="inline-end" />
-          </Button>
-        </>
-      }
-    >
-      <OnboardingStepHeader
-        stepLabel="Step 7 of 8"
-        title="Connect your WhatsApp number"
-        subtitle="Connect a number so customers can chat with your ordering assistant."
-      />
-      <div className="mt-2 flex justify-center">
-        <Badge variant="outline" className="h-7 border-border bg-background px-3 text-muted-foreground">
-          Optional
-        </Badge>
-      </div>
-
-      <div className="mt-4 flex flex-col gap-3">
+  const content = (
+    <div className={isSettings ? "flex flex-col gap-3" : "mt-4 flex flex-col gap-3"}>
         <OnboardingCard>
           <CardContent className="flex flex-col items-center px-5 py-5 text-center">
             <Image
@@ -452,7 +410,68 @@ export function WhatsAppConnectionForm({
             )}
           </CardContent>
         </OnboardingCard>
+    </div>
+  );
+
+  if (isSettings) {
+    return content;
+  }
+
+  return (
+    <OnboardingShell
+      currentStep={7}
+      contentClassName={ONBOARDING_CONTENT_CLASS_NAME}
+      mainClassName={ONBOARDING_MAIN_CLASS_NAME}
+      footerClassName="grid w-full grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2"
+      onSaveExit={handleSaveExit}
+      footer={
+        <>
+          <Button
+            type="button"
+            variant="outline"
+            size="lg"
+            onClick={() => router.push("/onboarding/assistant")}
+            className="h-10 min-w-[104px]"
+          >
+            <ArrowLeft data-icon="inline-start" />
+            Back
+          </Button>
+          <Button
+            type="button"
+            variant="link"
+            size="lg"
+            onClick={() => {
+              saveOnboardingResumePath("/onboarding/whatsapp");
+              router.push("/onboarding/review");
+            }}
+          >
+            Skip for now
+          </Button>
+          <Button
+            type="button"
+            size="lg"
+            disabled={isLoading || isSaving}
+            onClick={() => void persist("/onboarding/review")}
+            className="h-10 min-w-[136px]"
+          >
+            {isSaving ? <Spinner data-icon="inline-start" /> : null}
+            Continue
+            <ArrowRight data-icon="inline-end" />
+          </Button>
+        </>
+      }
+    >
+      <OnboardingStepHeader
+        stepLabel="Step 7 of 8"
+        title="Connect your WhatsApp number"
+        subtitle="Connect a number so customers can chat with your ordering assistant."
+      />
+      <div className="mt-2 flex justify-center">
+        <Badge variant="outline" className="h-7 border-border bg-background px-3 text-muted-foreground">
+          Optional
+        </Badge>
       </div>
+      {content}
     </OnboardingShell>
   );
 }

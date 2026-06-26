@@ -14,16 +14,19 @@ multi-tenancy rules, backend contracts, and roadmap/design-doc locations.
 - Stack: Next.js 16.2.9 App Router, React 19.2, TypeScript, Tailwind v4, shadcn/ui Base UI, lucide icons,
   pnpm.
 - Implemented routes: `/`, `/login`, `/signup`, `/onboarding`, `/onboarding/business-profile`,
-  `/onboarding/hours`, `/onboarding/fulfillment`, `/onboarding/menu`, and `/onboarding/assistant`.
-- Auth, sign-in/sign-up, and onboarding steps 1-6 are built.
+  `/onboarding/hours`, `/onboarding/fulfillment`, `/onboarding/menu`, `/onboarding/assistant`,
+  `/onboarding/whatsapp`, `/onboarding/review`, `/dashboard`, `/dashboard/orders`, `/dashboard/menu`,
+  `/dashboard/customers`, and `/dashboard/settings`.
+- Auth, sign-in/sign-up, onboarding steps 1-8, and the first owner dashboard routes are built.
 - Business profile, fulfillment/delivery zones, the menu builder, and AI assistant config are wired to the FastAPI API.
 - Business hours are currently client-side only. Persist them to the API when the ordering/agent flow needs
   authoritative hours.
 - The menu step now supports categories, products, reusable modifier templates, dish-specific groups,
   per-dish option availability/defaults/prices, template management, sample seeding, and the drawer from
   `screens/05-onboarding-menu-modifiers-drawer.png`. The AI assistant step stores English-only config without
-  tone or auto-approval fields. Onboarding steps 7-8, dashboard menu reuse, dashboard screens, and WhatsApp
-  connection are still pending.
+  tone or auto-approval fields. WhatsApp connection setup, review/go-live, dashboard overview, order board,
+  basic dashboard menu management, customers, and business profile settings are built. Deeper dashboard menu
+  editor extraction/reuse, richer dashboard screens, and billing are still pending.
 
 ## Local Development
 

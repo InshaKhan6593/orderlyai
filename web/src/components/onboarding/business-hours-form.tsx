@@ -32,7 +32,7 @@ import {
 import { Separator } from "@/components/ui/separator";
 import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
-import { ApiError } from "@/lib/auth";
+import { ApiError, clearTokens } from "@/lib/auth";
 import {
   addTimeSlot,
   applyMondayHours,
@@ -51,6 +51,10 @@ import {
   type BusinessDayHours,
   type TimeSlot,
 } from "@/lib/business-hours";
+import {
+  pickBusinessForOwner,
+  saveSelectedBusinessId,
+} from "@/lib/business-selection";
 import { listBusinesses } from "@/lib/business-profile";
 import { saveOnboardingResumePath } from "@/lib/onboarding-progress";
 
@@ -199,8 +203,17 @@ function ScheduleRow({
   );
 }
 
-export function BusinessHoursForm() {
+type BusinessHoursFormProps = {
+  variant?: "onboarding" | "settings";
+  onSaved?: () => void;
+};
+
+export function BusinessHoursForm({
+  variant = "onboarding",
+  onSaved,
+}: BusinessHoursFormProps = {}) {
   const router = useRouter();
+  const isSettings = variant === "settings";
   const [businessId, setBusinessId] = useState<string>();
   const [timezone, setTimezone] = useState("Asia/Karachi");
   const [acceptingOrders, setAcceptingOrders] = useState(true);
@@ -220,11 +233,11 @@ export function BusinessHoursForm() {
     let active = true;
     void listBusinesses(accessToken)
       .then(async (businesses) => {
-        const business =
-          businesses.find((item) => item.status === "onboarding") ?? businesses[0];
+        const business = pickBusinessForOwner(businesses);
         if (!business) {
           throw new ApiError("Complete your business profile first.", 400);
         }
+        saveSelectedBusinessId(business.id);
         const rows = await listBusinessHours({ accessToken, businessId: business.id });
         if (!active) return;
         setBusinessId(business.id);
@@ -269,11 +282,13 @@ export function BusinessHoursForm() {
 
     setIsSaving(true);
     try {
+      saveSelectedBusinessId(businessId);
       await saveBusinessHours({ accessToken, businessId, schedule, acceptingOrders });
       saveOnboardingResumePath(
         destination === "/login" ? "/onboarding/hours" : destination,
       );
       toast.success("Opening hours saved.");
+      if (destination === "/login") clearTokens();
       router.push(destination);
     } catch (error) {
       toast.error(
@@ -297,57 +312,38 @@ export function BusinessHoursForm() {
     );
   }
 
-  return (
-    <OnboardingShell
-      currentStep={3}
-      contentClassName={ONBOARDING_CONTENT_CLASS_NAME}
-      mainClassName={ONBOARDING_MAIN_CLASS_NAME}
-      footerClassName="w-full justify-between gap-3"
-      onSaveExit={() => void persist("/login")}
-      footer={
-        <>
-          <Button
-            type="button"
-            variant="outline"
-            size="lg"
-            onClick={() => router.push("/onboarding/business-profile")}
-            className="h-10 min-w-[104px]"
-          >
-            <ArrowLeft data-icon="inline-start" />
-            Back
-          </Button>
-          <Button
-            type="button"
-            variant="link"
-            size="lg"
-            onClick={() => {
-              saveOnboardingResumePath("/onboarding/fulfillment");
-              router.push("/onboarding/fulfillment");
-            }}
-          >
-            Skip for now
-          </Button>
-          <Button
-            type="button"
-            size="lg"
-            disabled={isLoading || isSaving || !isValid}
-            onClick={() => void persist("/onboarding/fulfillment")}
-            className="h-10 min-w-[136px]"
-          >
-            {isSaving ? <Spinner data-icon="inline-start" /> : null}
-            Continue
-            <ArrowRight data-icon="inline-end" />
-          </Button>
-        </>
-      }
-    >
-      <OnboardingStepHeader
-        stepLabel="Step 3 of 8"
-        title="When are you open?"
-        subtitle="Customers can only order during open hours."
-      />
+  async function handleSettingsSave() {
+    if (!isValid) {
+      toast.error("Check your hours before saving.", {
+        description: "Opening and closing times must be different.",
+      });
+      return;
+    }
+    const accessToken = accessTokenFromStorage();
+    if (!accessToken || !businessId) {
+      toast.error("Complete your business profile before saving hours.");
+      return;
+    }
+    setIsSaving(true);
+    try {
+      saveSelectedBusinessId(businessId);
+      await saveBusinessHours({ accessToken, businessId, schedule, acceptingOrders });
+      onSaved?.();
+      toast.success("Opening hours saved.");
+    } catch (error) {
+      toast.error(
+        error instanceof ApiError
+          ? error.message
+          : "Couldn't save your hours. Please try again.",
+      );
+    } finally {
+      setIsSaving(false);
+    }
+  }
 
-      <OnboardingCard className="mt-3">
+  const content = (
+    <>
+      <OnboardingCard className={isSettings ? "" : "mt-3"}>
         <CardHeader className="grid gap-3 px-5 py-3 has-data-[slot=card-action]:grid-cols-1 sm:items-center sm:has-data-[slot=card-action]:grid-cols-[minmax(0,1fr)_auto] lg:px-6">
           <div>
             <CardTitle className="font-sans text-lg">Accepting orders now</CardTitle>
@@ -421,6 +417,78 @@ export function BusinessHoursForm() {
           </div>
         </CardContent>
       </OnboardingCard>
+    </>
+  );
+
+  if (isSettings) {
+    return (
+      <div className="flex flex-col">
+        {content}
+        <div className="mt-6 flex items-center justify-end border-t border-border pt-4">
+          <Button
+            type="button"
+            onClick={() => void handleSettingsSave()}
+            disabled={isLoading || isSaving || !isValid}
+            className="h-10 min-w-[150px]"
+          >
+            {isSaving ? <Spinner data-icon="inline-start" /> : null}
+            Save changes
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <OnboardingShell
+      currentStep={3}
+      contentClassName={ONBOARDING_CONTENT_CLASS_NAME}
+      mainClassName={ONBOARDING_MAIN_CLASS_NAME}
+      footerClassName="w-full justify-between gap-3"
+      onSaveExit={() => void persist("/login")}
+      footer={
+        <>
+          <Button
+            type="button"
+            variant="outline"
+            size="lg"
+            onClick={() => router.push("/onboarding/business-profile")}
+            className="h-10 min-w-[104px]"
+          >
+            <ArrowLeft data-icon="inline-start" />
+            Back
+          </Button>
+          <Button
+            type="button"
+            variant="link"
+            size="lg"
+            onClick={() => {
+              saveOnboardingResumePath("/onboarding/fulfillment");
+              router.push("/onboarding/fulfillment");
+            }}
+          >
+            Skip for now
+          </Button>
+          <Button
+            type="button"
+            size="lg"
+            disabled={isLoading || isSaving || !isValid}
+            onClick={() => void persist("/onboarding/fulfillment")}
+            className="h-10 min-w-[136px]"
+          >
+            {isSaving ? <Spinner data-icon="inline-start" /> : null}
+            Continue
+            <ArrowRight data-icon="inline-end" />
+          </Button>
+        </>
+      }
+    >
+      <OnboardingStepHeader
+        stepLabel="Step 3 of 8"
+        title="When are you open?"
+        subtitle="Customers can only order during open hours."
+      />
+      {content}
     </OnboardingShell>
   );
 }

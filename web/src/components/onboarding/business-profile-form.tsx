@@ -56,7 +56,11 @@ import {
   type Business,
   type BusinessProfileValues,
 } from "@/lib/business-profile";
-import { ApiError } from "@/lib/auth";
+import { ApiError, clearTokens } from "@/lib/auth";
+import {
+  pickBusinessForOwner,
+  saveSelectedBusinessId,
+} from "@/lib/business-selection";
 import {
   loadOnboardingImage,
   saveOnboardingImage,
@@ -214,8 +218,17 @@ function ImageUploader({
   );
 }
 
-export function BusinessProfileForm() {
+type BusinessProfileFormProps = {
+  variant?: "onboarding" | "settings";
+  onSaved?: (business: Business) => void;
+};
+
+export function BusinessProfileForm({
+  variant = "onboarding",
+  onSaved,
+}: BusinessProfileFormProps = {}) {
   const router = useRouter();
+  const isSettings = variant === "settings";
   const [businessId, setBusinessId] = useState<string>();
   const [isLoadingProfile, setIsLoadingProfile] = useState(true);
   const [logoPreview, setLogoPreview] = useState<string>();
@@ -264,9 +277,9 @@ export function BusinessProfileForm() {
     void listBusinesses(accessToken)
       .then(async (businesses) => {
         if (!active) return;
-        const business =
-          businesses.find((item) => item.status === "onboarding") ?? businesses[0];
+        const business = pickBusinessForOwner(businesses);
         if (business) {
+          saveSelectedBusinessId(business.id);
           setBusinessId(business.id);
           reset(valuesFromBusiness(business));
           if (business.logo_url?.startsWith("http")) {
@@ -329,6 +342,15 @@ export function BusinessProfileForm() {
         existingBusinessId: businessId,
       });
       setBusinessId(saved.id);
+      saveSelectedBusinessId(saved.id);
+      if (isSettings) {
+        reset(valuesFromBusiness(saved));
+        if (saved.logo_url?.startsWith("http")) setLogoPreview(saved.logo_url);
+        if (saved.cover_url?.startsWith("http")) setCoverPreview(saved.cover_url);
+        onSaved?.(saved);
+        toast.success("Business profile saved.");
+        return;
+      }
       saveOnboardingResumePath("/onboarding/hours");
       toast.success("Business profile saved.");
       router.push("/onboarding/hours");
@@ -353,7 +375,8 @@ export function BusinessProfileForm() {
     // just leave rather than erroring on an empty create.
     if (!businessId && !hasRequiredBusinessProfileFields(values)) {
       saveOnboardingResumePath("/onboarding/business-profile");
-      router.push("/login");
+      clearTokens();
+      router.replace("/login");
       return;
     }
 
@@ -364,9 +387,11 @@ export function BusinessProfileForm() {
         existingBusinessId: businessId,
       });
       setBusinessId(saved.id);
+      saveSelectedBusinessId(saved.id);
       saveOnboardingResumePath("/onboarding/hours");
       toast.success("Progress saved.");
-      router.push("/login");
+      clearTokens();
+      router.replace("/login");
     } catch (error) {
       toast.error(
         error instanceof ApiError
@@ -378,49 +403,12 @@ export function BusinessProfileForm() {
 
   const isBusy = isLoadingProfile || isSubmitting;
 
-  return (
-    <OnboardingShell
-      currentStep={2}
-      onSaveExit={handleSaveExit}
-      contentClassName={ONBOARDING_CONTENT_CLASS_NAME}
-      mainClassName={ONBOARDING_MAIN_CLASS_NAME}
-      footerClassName="w-full justify-between gap-3"
-      footer={
-        <>
-          <Button
-            type="button"
-            variant="outline"
-            size="lg"
-            className="h-10 min-w-[104px]"
-            onClick={() => router.push("/onboarding")}
-          >
-            <ArrowLeft data-icon="inline-start" />
-            Back
-          </Button>
-          <Button
-            type="submit"
-            form="business-profile-form"
-            size="lg"
-            className="h-10 min-w-[136px]"
-            disabled={!hasRequiredFields || !isValid || isBusy}
-          >
-            {isBusy ? (
-              <Spinner data-icon="inline-start" />
-            ) : (
-              <ArrowRight data-icon="inline-end" />
-            )}
-            {isSubmitting ? "Saving..." : "Continue"}
-          </Button>
-        </>
-      }
+  const formContent = (
+    <form
+      id="business-profile-form"
+      className={isSettings ? "" : "mt-3"}
+      onSubmit={handleSubmit(onSubmit)}
     >
-      <OnboardingStepHeader
-        stepLabel="Step 2 of 8"
-        title="Tell us about your business"
-        subtitle="This is what your customers will see."
-      />
-
-      <form id="business-profile-form" className="mt-3" onSubmit={handleSubmit(onSubmit)}>
         <OnboardingCard>
           <CardContent className="p-0">
             <div className="grid lg:grid-cols-[0.62fr_1fr]">
@@ -712,6 +700,69 @@ export function BusinessProfileForm() {
           </CardContent>
         </OnboardingCard>
       </form>
+  );
+
+  if (isSettings) {
+    return (
+      <div className="flex flex-col">
+        {formContent}
+        <div className="mt-6 flex items-center justify-end border-t border-border pt-4">
+          <Button
+            type="submit"
+            form="business-profile-form"
+            className="h-10 min-w-[150px]"
+            disabled={!hasRequiredFields || !isValid || isBusy}
+          >
+            {isBusy ? <Spinner data-icon="inline-start" /> : null}
+            {isSubmitting ? "Saving..." : "Save changes"}
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <OnboardingShell
+      currentStep={2}
+      onSaveExit={handleSaveExit}
+      contentClassName={ONBOARDING_CONTENT_CLASS_NAME}
+      mainClassName={ONBOARDING_MAIN_CLASS_NAME}
+      footerClassName="w-full justify-between gap-3"
+      footer={
+        <>
+          <Button
+            type="button"
+            variant="outline"
+            size="lg"
+            className="h-10 min-w-[104px]"
+            onClick={() => router.push("/onboarding")}
+          >
+            <ArrowLeft data-icon="inline-start" />
+            Back
+          </Button>
+          <Button
+            type="submit"
+            form="business-profile-form"
+            size="lg"
+            className="h-10 min-w-[136px]"
+            disabled={!hasRequiredFields || !isValid || isBusy}
+          >
+            {isBusy ? (
+              <Spinner data-icon="inline-start" />
+            ) : (
+              <ArrowRight data-icon="inline-end" />
+            )}
+            {isSubmitting ? "Saving..." : "Continue"}
+          </Button>
+        </>
+      }
+    >
+      <OnboardingStepHeader
+        stepLabel="Step 2 of 8"
+        title="Tell us about your business"
+        subtitle="This is what your customers will see."
+      />
+      {formContent}
     </OnboardingShell>
   );
 }

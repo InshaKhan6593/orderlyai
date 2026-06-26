@@ -8,6 +8,7 @@ import { WelcomeIllustration } from "@/components/onboarding/welcome-illustratio
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { clearTokens } from "@/lib/auth";
 import { saveOnboardingResumePath } from "@/lib/onboarding-progress";
 
 const checklist = [
@@ -24,9 +25,15 @@ export default function OnboardingWelcomePage() {
     router.push("/onboarding/business-profile");
   }
 
+  function handleSaveExit() {
+    clearTokens();
+    router.replace("/login");
+  }
+
   return (
     <OnboardingShell
       currentStep={1}
+      onSaveExit={handleSaveExit}
       footer={
         <>
           <span className="inline-flex h-11 items-center gap-2 rounded-[10px] border border-primary/20 bg-primary/5 px-4 text-sm font-medium text-primary">

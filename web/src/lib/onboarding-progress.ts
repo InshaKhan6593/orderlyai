@@ -1,3 +1,5 @@
+import { pickBusinessForOwner } from "@/lib/business-selection";
+
 export const ONBOARDING_RESUME_STORAGE_KEY = "orderly.onboarding_resume_path";
 
 export const IMPLEMENTED_ONBOARDING_RESUME_PATHS = [
@@ -105,8 +107,7 @@ export async function resolveOnboardingResumePath({
 
   try {
     const businesses = await listBusinesses(accessToken);
-    const business =
-      businesses.find((item) => item.status === "onboarding") ?? businesses[0];
+    const business = pickBusinessForOwner(businesses, storage ?? undefined);
     if (!business) return "/onboarding";
 
     const zones = await listDeliveryZones({

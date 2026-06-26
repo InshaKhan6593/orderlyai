@@ -28,7 +28,11 @@ import { CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { Spinner } from "@/components/ui/spinner";
 import { getAgentConfig } from "@/lib/ai-assistant";
-import { ApiError } from "@/lib/auth";
+import { ApiError, clearTokens } from "@/lib/auth";
+import {
+  pickBusinessForOwner,
+  saveSelectedBusinessId,
+} from "@/lib/business-selection";
 import {
   goLiveBusiness,
   listBusinesses,
@@ -215,11 +219,11 @@ export function ReviewGoLive() {
     void (async () => {
       try {
         const businesses = await listBusinesses(token);
-        const selected =
-          businesses.find((item) => item.status === "onboarding") ?? businesses[0];
+        const selected = pickBusinessForOwner(businesses);
         if (!selected) {
           throw new ApiError("Complete your business profile first.", 400);
         }
+        saveSelectedBusinessId(selected.id);
 
         const [categories, products, zones, agentConfig, whatsappStatus] =
           await Promise.all([
@@ -285,7 +289,8 @@ export function ReviewGoLive() {
 
   function handleFinishLater() {
     saveOnboardingResumePath("/onboarding/review");
-    router.push("/login");
+    clearTokens();
+    router.replace("/login");
   }
 
   async function handleGoLive() {
@@ -301,10 +306,12 @@ export function ReviewGoLive() {
     setIsGoingLive(true);
     try {
       const updated = await goLiveBusiness({ accessToken, businessId: business.id });
+      saveSelectedBusinessId(updated.id);
       setBusiness(updated);
       setIsLive(true);
       window.localStorage.removeItem(ONBOARDING_RESUME_STORAGE_KEY);
       toast.success("Your store is live! 🎉");
+      router.push("/dashboard");
     } catch (error) {
       toast.error(
         error instanceof ApiError
@@ -346,13 +353,19 @@ export function ReviewGoLive() {
           <Button
             type="button"
             size="lg"
-            disabled={isLoading || isGoingLive || isLive || !canGoLive}
-            onClick={() => void handleGoLive()}
+            disabled={isLoading || isGoingLive || (!isLive && !canGoLive)}
+            onClick={() => {
+              if (isLive) {
+                router.push("/dashboard");
+              } else {
+                void handleGoLive();
+              }
+            }}
             className="h-10 min-w-[136px]"
           >
             {isGoingLive ? <Spinner data-icon="inline-start" /> : null}
-            {isLive ? "You're live" : "Go live"}
-            {isLive ? null : <ArrowRight data-icon="inline-end" />}
+            {isLive ? "Go to dashboard" : "Go live"}
+            <ArrowRight data-icon="inline-end" />
           </Button>
         </>
       }

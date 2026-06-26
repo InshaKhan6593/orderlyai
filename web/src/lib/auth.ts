@@ -26,6 +26,15 @@ export function storeTokens(tokens: Tokens, remember = true): void {
   secondary.removeItem(REFRESH_KEY);
 }
 
+/** Sign out: drop access + refresh tokens from both stores. */
+export function clearTokens(): void {
+  if (typeof window === "undefined") return;
+  for (const store of [window.localStorage, window.sessionStorage]) {
+    store.removeItem(ACCESS_KEY);
+    store.removeItem(REFRESH_KEY);
+  }
+}
+
 /** Error envelope returned by the backend: { error: { code, message } }. */
 type ApiErrorBody = { error?: { code?: string; message?: string } };
 
@@ -99,4 +108,54 @@ export function register(
         ? "An account with this email already exists."
         : "Couldn't create your account. Please try again.",
   );
+}
+
+/** The shape returned by GET /auth/me (mirrors the backend `UserOut`). */
+export type CurrentUserProfile = {
+  id: string;
+  email: string;
+  full_name: string | null;
+  is_active: boolean;
+};
+
+/** Read the stored access token (localStorage preferred, then sessionStorage). */
+export function readAccessToken(): string | null {
+  if (typeof window === "undefined") return null;
+  return (
+    window.localStorage.getItem(ACCESS_KEY) ??
+    window.sessionStorage.getItem(ACCESS_KEY)
+  );
+}
+
+/** GET /auth/me — the authenticated user, or throws ApiError. */
+export async function getCurrentUser(
+  accessToken: string,
+  fetcher: typeof fetch = fetch,
+): Promise<CurrentUserProfile> {
+  let res: Response;
+  try {
+    res = await fetcher(apiUrl("/auth/me"), {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+  } catch {
+    throw new ApiError(
+      "Couldn't reach the server. Is the API running on http://localhost:8000?",
+      0,
+    );
+  }
+
+  if (!res.ok) {
+    let message = "Couldn't load your account.";
+    let code: string | undefined;
+    try {
+      const errorBody = (await res.json()) as ApiErrorBody;
+      if (errorBody.error?.message) message = errorBody.error.message;
+      code = errorBody.error?.code;
+    } catch {
+      // non-JSON error body — keep the status-based message
+    }
+    throw new ApiError(message, res.status, code);
+  }
+
+  return (await res.json()) as CurrentUserProfile;
 }

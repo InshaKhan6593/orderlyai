@@ -54,7 +54,11 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { ApiError } from "@/lib/auth";
+import { ApiError, clearTokens } from "@/lib/auth";
+import {
+  pickBusinessForOwner,
+  saveSelectedBusinessId,
+} from "@/lib/business-selection";
 import { listBusinesses } from "@/lib/business-profile";
 import {
   createDeliveryZoneDraft,
@@ -226,8 +230,17 @@ function accessTokenFromStorage(): string | null {
   );
 }
 
-export function FulfillmentForm() {
+type FulfillmentFormProps = {
+  variant?: "onboarding" | "settings";
+  onSaved?: () => void;
+};
+
+export function FulfillmentForm({
+  variant = "onboarding",
+  onSaved,
+}: FulfillmentFormProps = {}) {
   const router = useRouter();
+  const isSettings = variant === "settings";
   const nextZoneNumber = useRef(2);
   const [businessId, setBusinessId] = useState<string>();
   const [currency, setCurrency] = useState("PKR");
@@ -259,11 +272,11 @@ export function FulfillmentForm() {
     let active = true;
     void listBusinesses(accessToken)
       .then(async (businesses) => {
-        const business =
-          businesses.find((item) => item.status === "onboarding") ?? businesses[0];
+        const business = pickBusinessForOwner(businesses);
         if (!business) {
           throw new ApiError("Complete your business profile first.", 400);
         }
+        saveSelectedBusinessId(business.id);
         const zones = await listDeliveryZones({
           accessToken,
           businessId: business.id,
@@ -360,6 +373,7 @@ export function FulfillmentForm() {
 
     setIsSaving(true);
     try {
+      saveSelectedBusinessId(businessId);
       await saveFulfillment({
         accessToken,
         businessId,
@@ -371,6 +385,7 @@ export function FulfillmentForm() {
         destination === "/login" ? "/onboarding/fulfillment" : destination,
       );
       toast.success("Fulfillment settings saved.");
+      if (destination === "/login") clearTokens();
       router.push(destination);
     } catch (error) {
       toast.error(
@@ -383,57 +398,38 @@ export function FulfillmentForm() {
     }
   }
 
-  return (
-    <OnboardingShell
-      currentStep={4}
-      contentClassName={ONBOARDING_CONTENT_CLASS_NAME}
-      mainClassName={ONBOARDING_MAIN_CLASS_NAME}
-      footerClassName="w-full justify-between gap-3"
-      onSaveExit={() => void persist("/login")}
-      footer={
-        <>
-          <Button
-            type="button"
-            variant="outline"
-            size="lg"
-            onClick={() => router.push("/onboarding/hours")}
-            className="h-10 min-w-[104px]"
-          >
-            <ArrowLeft data-icon="inline-start" />
-            Back
-          </Button>
-          <Button
-            type="button"
-            variant="link"
-            size="lg"
-            onClick={() => {
-              saveOnboardingResumePath("/onboarding/fulfillment");
-              router.push("/onboarding/menu");
-            }}
-          >
-            Skip for now
-          </Button>
-          <Button
-            type="button"
-            size="lg"
-            disabled={isLoading || isSaving}
-            onClick={() => void persist("/onboarding/menu")}
-            className="h-10 min-w-[136px]"
-          >
-            {isSaving ? <Spinner data-icon="inline-start" /> : null}
-            Continue
-            <ArrowRight data-icon="inline-end" />
-          </Button>
-        </>
-      }
-    >
-      <OnboardingStepHeader
-        stepLabel="Step 4 of 8"
-        title="How do customers get their food?"
-        subtitle="Choose your fulfillment options and delivery settings."
-      />
+  async function handleSettingsSave() {
+    setShowErrors(true);
+    if (hasFulfillmentErrors(errors)) {
+      toast.error("Check your fulfillment settings before saving.");
+      return;
+    }
+    const accessToken = accessTokenFromStorage();
+    if (!accessToken || !businessId) {
+      toast.error("Complete your business profile before saving fulfillment settings.");
+      return;
+    }
+    setIsSaving(true);
+    try {
+      saveSelectedBusinessId(businessId);
+      await saveFulfillment({ accessToken, businessId, values, deletedZoneIds });
+      setDeletedZoneIds([]);
+      onSaved?.();
+      toast.success("Fulfillment settings saved.");
+    } catch (error) {
+      toast.error(
+        error instanceof ApiError
+          ? error.message
+          : "Couldn't save fulfillment settings. Please try again.",
+      );
+    } finally {
+      setIsSaving(false);
+    }
+  }
 
-      <OnboardingCard className="mt-3">
+  const content = (
+    <>
+      <OnboardingCard className={isSettings ? "" : "mt-3"}>
         <CardHeader className="px-5 py-3 lg:px-6">
           <CardTitle className="font-sans text-lg">Fulfillment options</CardTitle>
         </CardHeader>
@@ -607,6 +603,78 @@ export function FulfillmentForm() {
           </CardContent>
         </OnboardingCard>
       ) : null}
+    </>
+  );
+
+  if (isSettings) {
+    return (
+      <div className="flex flex-col">
+        {content}
+        <div className="mt-6 flex items-center justify-end border-t border-border pt-4">
+          <Button
+            type="button"
+            onClick={() => void handleSettingsSave()}
+            disabled={isLoading || isSaving}
+            className="h-10 min-w-[150px]"
+          >
+            {isSaving ? <Spinner data-icon="inline-start" /> : null}
+            Save changes
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <OnboardingShell
+      currentStep={4}
+      contentClassName={ONBOARDING_CONTENT_CLASS_NAME}
+      mainClassName={ONBOARDING_MAIN_CLASS_NAME}
+      footerClassName="w-full justify-between gap-3"
+      onSaveExit={() => void persist("/login")}
+      footer={
+        <>
+          <Button
+            type="button"
+            variant="outline"
+            size="lg"
+            onClick={() => router.push("/onboarding/hours")}
+            className="h-10 min-w-[104px]"
+          >
+            <ArrowLeft data-icon="inline-start" />
+            Back
+          </Button>
+          <Button
+            type="button"
+            variant="link"
+            size="lg"
+            onClick={() => {
+              saveOnboardingResumePath("/onboarding/fulfillment");
+              router.push("/onboarding/menu");
+            }}
+          >
+            Skip for now
+          </Button>
+          <Button
+            type="button"
+            size="lg"
+            disabled={isLoading || isSaving}
+            onClick={() => void persist("/onboarding/menu")}
+            className="h-10 min-w-[136px]"
+          >
+            {isSaving ? <Spinner data-icon="inline-start" /> : null}
+            Continue
+            <ArrowRight data-icon="inline-end" />
+          </Button>
+        </>
+      }
+    >
+      <OnboardingStepHeader
+        stepLabel="Step 4 of 8"
+        title="How do customers get their food?"
+        subtitle="Choose your fulfillment options and delivery settings."
+      />
+      {content}
     </OnboardingShell>
   );
 }

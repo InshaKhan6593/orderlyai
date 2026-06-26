@@ -63,7 +63,11 @@ import { Spinner } from "@/components/ui/spinner";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
-import { ApiError } from "@/lib/auth";
+import { ApiError, clearTokens } from "@/lib/auth";
+import {
+  pickBusinessForOwner,
+  saveSelectedBusinessId,
+} from "@/lib/business-selection";
 import { listBusinesses } from "@/lib/business-profile";
 import {
   createCategory,
@@ -558,7 +562,7 @@ function LimitSelect({
   );
 }
 
-function MenuDishDrawer({
+export function MenuDishDrawer({
   draft,
   categories,
   modifierGroups,
@@ -1465,7 +1469,7 @@ function MenuDishDrawer({
   );
 }
 
-function CategoryNameDialog({
+export function CategoryNameDialog({
   title,
   description,
   submitLabel,
@@ -1619,11 +1623,11 @@ export function MenuBuilder({ initialState }: MenuBuilderProps) {
     let active = true;
     void listBusinesses(token)
       .then(async (businesses) => {
-        const business =
-          businesses.find((item) => item.status === "onboarding") ?? businesses[0];
+        const business = pickBusinessForOwner(businesses);
         if (!business) {
           throw new ApiError("Complete your business profile first.", 400);
         }
+        saveSelectedBusinessId(business.id);
         const [loadedCategories, loadedProducts, loadedModifierGroups] =
           await Promise.all([
           listCategories({ accessToken: token, businessId: business.id }),
@@ -1664,7 +1668,8 @@ export function MenuBuilder({ initialState }: MenuBuilderProps) {
 
   function handleSaveExit() {
     saveOnboardingResumePath("/onboarding/menu");
-    router.push("/login");
+    clearTokens();
+    router.replace("/login");
   }
 
   function openNewDish() {

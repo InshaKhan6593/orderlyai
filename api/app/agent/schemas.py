@@ -18,7 +18,14 @@ from __future__ import annotations
 
 from typing import Annotated, Literal, Union
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 
 _TRUNCATION_SUFFIX = "..."
@@ -63,7 +70,7 @@ class TextMessage(BaseModel):
 
 class ListRow(BaseModel):
     # Self-describing ids let the worker interpret a tap deterministically:
-    # "product:<uuid>", "confirm_order", "edit_cart", "cancel_order".
+    # "product:<uuid>", "reorder:<order_no>", "confirm_order", "edit_cart", "cancel_order".
     id: str = Field(max_length=200)
     title: str = Field(max_length=24)
     description: str | None = Field(default=None, max_length=72)
@@ -151,9 +158,16 @@ class ButtonsMessage(BaseModel):
 
 
 class ImageMessage(BaseModel):
+    # The other message kinds (text/list/buttons) all use `body`, so the model frequently emits
+    # `body` for an image's text too. Accept it as an alias for `caption` so the caption (price,
+    # "add to cart?", etc.) is never silently dropped — Pydantic ignores unknown fields by default.
+    model_config = ConfigDict(populate_by_name=True)
+
     kind: Literal["image"]
     image_url: str
-    caption: str | None = Field(default=None, max_length=1024)
+    caption: str | None = Field(
+        default=None, max_length=1024, validation_alias=AliasChoices("caption", "body")
+    )
 
     @field_validator("caption", mode="before")
     @classmethod
@@ -182,3 +196,6 @@ BTN_CONFIRM = "confirm_order"
 BTN_EDIT = "edit_cart"
 BTN_CANCEL = "cancel_order"
 ROW_PRODUCT_PREFIX = "product:"
+# Reorder button/row id: "reorder:" + the past order number (e.g. "reorder:2"). A tap rebuilds
+# the cart from that order via the reorder tool — the customer's own past order, re-priced today.
+ROW_REORDER_PREFIX = "reorder:"

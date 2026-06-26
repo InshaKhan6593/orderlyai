@@ -264,20 +264,42 @@ async def _next_order_no(db: AsyncSession, business_id: uuid.UUID) -> int:
 
 
 async def _upsert_customer_id(
-    db: AsyncSession, business_id: uuid.UUID, phone: str, name: str | None
+    db: AsyncSession,
+    business_id: uuid.UUID,
+    phone: str,
+    name: str | None,
+    *,
+    email: str | None = None,
+    alternate_phone: str | None = None,
+    default_address: str | None = None,
 ) -> uuid.UUID:
     """Atomically upsert (business_id, wa_phone) and return the customer id.
 
-    Uses PostgreSQL ``ON CONFLICT`` so concurrent first orders from the same
-    phone can't violate the unique constraint. An existing name is preserved;
-    a missing name is backfilled.
+    Uses PostgreSQL ``ON CONFLICT`` so concurrent first orders from the same phone can't
+    violate the unique constraint. Contact details follow "latest provided wins, else keep":
+    a value supplied now overwrites the stored one (so a customer can correct their name,
+    email, phone, or default address), while fields left ``None`` preserve what's on file.
     """
     stmt = pg_insert(Customer).values(
-        business_id=business_id, wa_phone=phone, name=name
+        business_id=business_id,
+        wa_phone=phone,
+        name=name,
+        email=email,
+        alternate_phone=alternate_phone,
+        default_address=default_address,
     )
     stmt = stmt.on_conflict_do_update(
         constraint="customers_business_phone",
-        set_={"name": func.coalesce(Customer.name, stmt.excluded.name)},
+        set_={
+            "name": func.coalesce(stmt.excluded.name, Customer.name),
+            "email": func.coalesce(stmt.excluded.email, Customer.email),
+            "alternate_phone": func.coalesce(
+                stmt.excluded.alternate_phone, Customer.alternate_phone
+            ),
+            "default_address": func.coalesce(
+                stmt.excluded.default_address, Customer.default_address
+            ),
+        },
     ).returning(Customer.id)
     result = await db.execute(stmt)
     return result.scalar_one()
@@ -348,7 +370,14 @@ async def create_order(db: AsyncSession, business: Business, data: OrderCreate) 
         raise BadRequestError("This business does not offer pickup")
 
     customer_id = await _upsert_customer_id(
-        db, business.id, data.customer_phone, data.customer_name
+        db,
+        business.id,
+        data.customer_phone,
+        data.customer_name,
+        email=data.customer_email,
+        alternate_phone=data.customer_alt_phone,
+        # Save a delivery address as the customer's default so it prefills next time.
+        default_address=data.address if data.fulfillment == "delivery" else None,
     )
 
     products = await _load_products(

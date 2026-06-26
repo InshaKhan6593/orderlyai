@@ -34,10 +34,10 @@ async def lifespan(app: FastAPI):
     agent and runs the inbox sweeper (crash recovery + send retries). The webhook's per-request
     drain works regardless; this just owns the long-lived agent and the background sweep.
     """
-    sweeper: asyncio.Task | None = None
+    tasks: list[asyncio.Task] = []
     if settings.run_agent_worker:
         from app.agent.runtime import start_durable_agent
-        from app.services.whatsapp_worker import sweeper_loop
+        from app.services.whatsapp_worker import retention_loop, sweeper_loop
 
         if settings.whatsapp_durable_memory:
             try:
@@ -45,14 +45,17 @@ async def lifespan(app: FastAPI):
                 logger.info("Durable WhatsApp agent ready (Postgres checkpointer).")
             except Exception:  # noqa: BLE001 — don't let a checkpointer hiccup block startup
                 logger.exception("Failed to start durable agent; using in-process memory.")
-        sweeper = asyncio.create_task(sweeper_loop())
+        # The sweeper recovers unfinished sends; retention bounds inbox + checkpoint growth.
+        tasks.append(asyncio.create_task(sweeper_loop()))
+        tasks.append(asyncio.create_task(retention_loop()))
     try:
         yield
     finally:
-        if sweeper is not None:
-            sweeper.cancel()
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
             try:
-                await sweeper
+                await task
             except asyncio.CancelledError:
                 pass
         from app.agent.runtime import stop_durable_agent

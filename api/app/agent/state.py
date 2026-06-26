@@ -1,8 +1,9 @@
 """Agent working state — the live cart + flow, persisted by the checkpointer.
 
-This is the LangGraph short-term memory keyed by ``thread_id = business_id:wa_phone``.
-It is NOT the durable chat log (that's the ``messages`` table) and NOT business data
-(that's the CMS tables). The cart never becomes a DB row until the order is placed.
+This is the LangGraph short-term memory keyed by ``thread_id = business_id:wa_phone``. It
+(and the message history) is persisted by the LangGraph checkpointer — the Postgres
+``checkpoint*`` tables, NOT a hand-rolled messages table — and is distinct from business data
+(the CMS tables). The cart never becomes a DB row until the order is placed.
 
 Cart lines are stored as plain ``dict``s (not Pydantic instances) so they round-trip
 cleanly through the checkpointer's JSON serializer.
@@ -31,12 +32,24 @@ class OrderingState(AgentState):
     selected_product_id: str | None
     fulfillment: Literal["delivery", "pickup"] | None
     address: str | None
+    customer_name: str | None      # contact details, loaded deterministically from the saved
+    customer_email: str | None     # customer record at checkout (the model never sets them)
+    customer_alt_phone: str | None
+    pending_contact_field: Literal["name", "email", "alternate_phone"] | None
+                                   # set by place_order when a required contact field is missing;
+                                   # run_turn then asks for it and validates/saves the typed reply
+                                   # in code. Persists across turns until filled (not reset per turn)
     zone_id: str | None
     zone_serviceable: bool | None
     notes: str | None
     step: Step
     confirmed: bool                # flipped ONLY by the confirm-button handler (worker)
+    awaiting_confirm: bool         # set by place_order when a Confirm tap is needed; run_turn
+                                   # then GUARANTEES the [Confirm][Edit][Cancel] buttons render
+    confirm_summary: str | None    # server-priced cart total shown alongside those buttons
+    order_placed_summary: str | None  # set by place_order on success; run_turn sends it verbatim
     handoff_reason: str | None
+    handoff_at: str | None         # ISO time of handoff; run_turn auto-resumes after the mute window
 
 
 def new_line(
@@ -58,12 +71,20 @@ def initial_state(**overrides: Any) -> dict[str, Any]:
         "selected_product_id": None,
         "fulfillment": None,
         "address": None,
+        "customer_name": None,
+        "customer_email": None,
+        "customer_alt_phone": None,
+        "pending_contact_field": None,
         "zone_id": None,
         "zone_serviceable": None,
         "notes": None,
         "step": "browsing",
         "confirmed": False,
+        "awaiting_confirm": False,
+        "confirm_summary": None,
+        "order_placed_summary": None,
         "handoff_reason": None,
+        "handoff_at": None,
     }
     base.update(overrides)
     return base

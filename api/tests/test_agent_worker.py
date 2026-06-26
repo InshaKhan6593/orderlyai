@@ -166,7 +166,7 @@ def test_back_to_back_texts_are_coalesced(client, business, monkeypatch):
     seen_texts: list[str] = []
     sends: list = []
 
-    async def fake_run_turn(agent, *, business_id, customer_phone, thread_id, text, confirmed=False):
+    async def fake_run_turn(agent, *, business_id, customer_phone, thread_id, text, confirmed=False, reply_id=None):
         seen_texts.append(text)
         return AgentReply(messages=[TextMessage(kind="text", body="ok")])
 
@@ -196,7 +196,7 @@ def test_confirm_tap_is_its_own_turn(client, business, monkeypatch):
 
     calls: list[tuple[str, bool]] = []
 
-    async def fake_run_turn(agent, *, business_id, customer_phone, thread_id, text, confirmed=False):
+    async def fake_run_turn(agent, *, business_id, customer_phone, thread_id, text, confirmed=False, reply_id=None):
         calls.append((text, confirmed))
         return AgentReply(messages=[TextMessage(kind="text", body="ok")])
 
@@ -228,7 +228,7 @@ def test_failed_send_resends_without_rerunning_agent(client, business, monkeypat
     run_calls = {"n": 0}
     send_calls = {"n": 0}
 
-    async def fake_run_turn(agent, *, business_id, customer_phone, thread_id, text, confirmed=False):
+    async def fake_run_turn(agent, *, business_id, customer_phone, thread_id, text, confirmed=False, reply_id=None):
         run_calls["n"] += 1
         return AgentReply(messages=[TextMessage(kind="text", body="reply")])
 
@@ -412,3 +412,178 @@ def test_status_notification_sends_within_window(client, menu, monkeypatch):
     sent_out = asyncio.run(_mark_recent_then_notify(within=False))
     assert sent_out is False
     assert sent == []
+
+
+# --------------------------------------------------------------------------- #
+# Partial multi-message send: a retry resumes, never re-delivering what arrived
+# --------------------------------------------------------------------------- #
+def test_partial_multi_send_resumes_without_duplicating(client, business, monkeypatch):
+    from sqlalchemy import select
+    from app.models.whatsapp import WhatsAppInbox
+
+    headers, business_id = business
+    pnid = str(uuid.uuid4().int)[:15]
+    _save_connection(client, headers, business_id, pnid)
+    sender = "16500000007"
+
+    async def fake_run_turn(agent, *, business_id, customer_phone, thread_id, text, confirmed=False, reply_id=None):
+        # Two-message reply → two payloads.
+        return AgentReply(
+            messages=[TextMessage(kind="text", body="one"), TextMessage(kind="text", body="two")]
+        )
+
+    batches: list[int] = []
+
+    async def fake_send(*, phone_number_id, access_token, payloads):
+        batches.append(len(payloads))
+        if len(batches) == 1:
+            # Delivered the FIRST of two, then failed → must resume from the second.
+            return whatsapp_service.SendResult(
+                ok=False, retryable=True, status_code=503, sent=1, sent_ids=["w1"]
+            )
+        return whatsapp_service.SendResult(ok=True, sent=len(payloads), sent_ids=["w2"])
+
+    _stub_pipeline(monkeypatch, run_turn=fake_run_turn, send_payloads=fake_send)
+    thread = f"{business_id}:{sender}"
+
+    async def _run():
+        async with _TestSession() as db:
+            await whatsapp_worker.persist_inbound(db, _parsed(_text_payload(pnid, sender, "hi", "wamid.m")))
+        await whatsapp_worker.drain_conversation(thread)  # sends 1/2, fails → answered, sent_count=1
+        await whatsapp_worker.drain_conversation(thread)  # resumes the 2nd only → done
+        async with _TestSession() as db:
+            row = (
+                await db.execute(select(WhatsAppInbox).where(WhatsAppInbox.message_id == "wamid.m"))
+            ).scalar_one()
+            return row.status, row.sent_count, row.sent_message_ids
+
+    status, sent_count, sent_ids = asyncio.run(_run())
+    assert batches == [2, 1]  # first attempt both; retry only the undelivered one (no duplicate)
+    assert status == "done"
+    assert sent_count == 2
+    assert sent_ids == ["w1", "w2"]
+
+
+# --------------------------------------------------------------------------- #
+# Delivery-status webhooks: a post-accept FAILED is recorded against the reply
+# --------------------------------------------------------------------------- #
+def test_failed_delivery_status_is_recorded(client, business, monkeypatch):
+    import json
+
+    from sqlalchemy import select
+    from app.models.whatsapp import WhatsAppInbox
+
+    headers, business_id = business
+    pnid = str(uuid.uuid4().int)[:15]
+    _save_connection(client, headers, business_id, pnid)
+    sender = "16500000008"
+    monkeypatch.setattr(whatsapp_worker, "SessionLocal", _TestSession)
+
+    status_body = json.dumps(
+        {
+            "entry": [
+                {
+                    "changes": [
+                        {
+                            "value": {
+                                "metadata": {"phone_number_id": pnid},
+                                "statuses": [
+                                    {
+                                        "id": "wamid.OUT1",
+                                        "status": "failed",
+                                        "recipient_id": sender,
+                                        "errors": [{"code": 131026, "title": "Undeliverable"}],
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                }
+            ]
+        }
+    ).encode()
+
+    async def _run():
+        async with _TestSession() as db:
+            await whatsapp_worker.persist_inbound(db, _parsed(_text_payload(pnid, sender, "hi", "wamid.s")))
+            row = (
+                await db.execute(select(WhatsAppInbox).where(WhatsAppInbox.message_id == "wamid.s"))
+            ).scalar_one()
+            row.sent_message_ids = ["wamid.OUT1"]  # the wamid Meta later reports failed
+            await db.commit()
+        touched = await whatsapp_worker.record_statuses_from_body(status_body)
+        async with _TestSession() as db:
+            row = (
+                await db.execute(select(WhatsAppInbox).where(WhatsAppInbox.message_id == "wamid.s"))
+            ).scalar_one()
+            return touched, row.delivery_state, row.error
+
+    touched, state, error = asyncio.run(_run())
+    assert touched == 1
+    assert state == "failed"
+    assert "131026" in (error or "")
+
+
+# --------------------------------------------------------------------------- #
+# Retention: an inactive conversation's inbox rows are purged
+# --------------------------------------------------------------------------- #
+def test_purge_removes_inactive_conversations(client, business, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import func, select, update
+    from app.models.whatsapp import WhatsAppInbox
+
+    headers, business_id = business
+    pnid = str(uuid.uuid4().int)[:15]
+    _save_connection(client, headers, business_id, pnid)
+    sender = "16500000010"
+    monkeypatch.setattr(whatsapp_worker, "SessionLocal", _TestSession)
+    monkeypatch.setattr(settings, "whatsapp_retention_days", 30)
+
+    async def _run():
+        async with _TestSession() as db:
+            await whatsapp_worker.persist_inbound(db, _parsed(_text_payload(pnid, sender, "old", "wamid.old")))
+            old_ts = datetime.now(timezone.utc) - timedelta(days=60)
+            await db.execute(
+                update(WhatsAppInbox)
+                .where(WhatsAppInbox.message_id == "wamid.old")
+                .values(created_at=old_ts)
+            )
+            await db.commit()
+        purged = await whatsapp_worker.purge_once()
+        async with _TestSession() as db:
+            remaining = await db.scalar(
+                select(func.count())
+                .select_from(WhatsAppInbox)
+                .where(WhatsAppInbox.message_id == "wamid.old")
+            )
+        return purged, remaining
+
+    purged, remaining = asyncio.run(_run())
+    assert purged >= 1
+    assert remaining == 0
+
+
+# --------------------------------------------------------------------------- #
+# Handoff is time-boxed: the bot resumes after the mute window (no permanent mute)
+# --------------------------------------------------------------------------- #
+def test_handoff_mute_window_expires():
+    from datetime import datetime, timedelta, timezone
+
+    from app.agent.runtime import _handoff_active
+
+    now = datetime.now(timezone.utc)
+    settings.whatsapp_handoff_mute_hours = 24
+    try:
+        # Fresh handoff → still muted; old handoff → resume.
+        assert _handoff_active({"step": "handed_off", "handoff_at": now.isoformat()}) is True
+        old = (now - timedelta(hours=25)).isoformat()
+        assert _handoff_active({"step": "handed_off", "handoff_at": old}) is False
+        # Not handed off, or no timestamp (legacy) → resume / stay muted respectively.
+        assert _handoff_active({"step": "browsing"}) is False
+        assert _handoff_active({"step": "handed_off"}) is True
+        # 0 hours → never auto-resume.
+        settings.whatsapp_handoff_mute_hours = 0
+        assert _handoff_active({"step": "handed_off", "handoff_at": old}) is True
+    finally:
+        settings.whatsapp_handoff_mute_hours = 24

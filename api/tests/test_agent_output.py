@@ -124,6 +124,26 @@ def test_render_list_buttons_image_text_payloads():
     assert txt["type"] == "text" and txt["text"]["body"] == "Anything else?"
 
 
+def test_image_message_accepts_body_as_caption_alias():
+    # Regression: the model often emits `body` (like text/list/buttons) for an image instead of
+    # `caption`; it must map to the caption, not be silently dropped (which sent a bare photo).
+    reply = AgentReply.model_validate(
+        {
+            "messages": [
+                {
+                    "kind": "image",
+                    "image_url": "https://x/y.jpg",
+                    "body": "*Double Cheese Burger* - 1895 PKR. Add to cart?",
+                }
+            ]
+        }
+    )
+    img = to_payloads(reply, to="1")[0]
+    assert img["type"] == "image"
+    assert img["image"]["link"] == "https://x/y.jpg"
+    assert "Double Cheese Burger" in img["image"]["caption"]
+
+
 def test_render_truncates_long_text_defensively():
     reply = AgentReply(messages=[TextMessage(kind="text", body="a" * 4096)])
     body = to_payloads(reply, to="1")[0]["text"]["body"]

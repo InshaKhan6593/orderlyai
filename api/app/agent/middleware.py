@@ -1,12 +1,15 @@
 """Agent middleware (async — the agent runs via ``ainvoke``).
 
-``TenantMiddleware`` is the per-run brain wiring done in one async hook:
-  1. loads the business from ``runtime.context`` and renders the per-tenant system prompt
-     (this is also the "read-before-write" guardrail, stated in natural language),
-  2. exposes cart/checkout tools only once a cart exists (a guardrail + less confusion),
+``TenantMiddleware`` is the per-run brain wiring, done in one async hook:
+  1. loads the per-tenant snapshot (identity + hours + fees + categories + the menu, cached
+     for a few seconds) and renders the system prompt — inlining the menu when it fits, which
+     is also the "read-before-write" guardrail stated in natural language,
+  2. selects the tools the model may use: cart/checkout tools appear only once a cart exists,
+     and ``get_menu`` is hidden when the menu is already inlined (so the model reads it from
+     context instead of re-fetching it),
   3. escalates to the stronger model on long/hard turns.
 
-Note: hooks MUST be async here — LangChain raises NotImplementedError if only the sync
+Note: the hook MUST be async here — LangChain raises NotImplementedError if only the sync
 variant is defined and the agent is invoked with ``ainvoke``.
 """
 from __future__ import annotations
@@ -21,39 +24,30 @@ from langchain.agents.middleware import (  # type: ignore[import-not-found]
     ModelResponse,
 )
 
-from app.agent import catalog
+from app.agent import snapshot
 from app.agent.context import ctx_dict
-from app.agent.prompts import BusinessBrief, render_system_prompt
+from app.agent.prompts import render_system_prompt
 from app.agent.tools import CART_ONLY_TOOLS
-from app.core.db import SessionLocal
-
-
-def _brief(business: Any) -> BusinessBrief:
-    cfg = business.agent_config
-    hours = list(business.hours)
-    return BusinessBrief(
-        name=business.name,
-        business_type=business.type.replace("_", " "),
-        currency=business.currency,
-        hours_summary=catalog.format_hours(hours),
-        is_open=catalog.is_open_now(hours, business.timezone),
-        accepting_orders=business.accepting_orders,
-        offers_delivery=business.offers_delivery,
-        offers_pickup=business.offers_pickup,
-        min_order_amount=str(business.min_order_amount),
-        packaging_fee=str(business.packaging_fee),
-        upsell_enabled=cfg.upsell_enabled if cfg else True,
-        greeting=(cfg.greeting_message if cfg else None)
-        or f"Hi! Welcome to {business.name}. How can I help?",
-        categories_summary=", ".join(catalog.category_names(business)),
-        extra_instructions=cfg.extra_instructions if cfg else None,
-        handoff_phone=cfg.human_handoff_phone if cfg else None,
-    )
 
 _FALLBACK_PROMPT = (
     "You are a WhatsApp ordering assistant. This business is not available right now; "
     "apologize briefly and do not take an order."
 )
+
+
+def select_tools(tools: list, *, has_cart: bool, menu_preloaded: bool) -> list:
+    """The tools the model may use this call (a guardrail + less for the model to confuse).
+
+    - ``get_menu`` is dropped when the menu is already inlined in the prompt — the model
+      should answer from context, not round-trip the tool.
+    - Cart/checkout tools stay hidden until the cart has something in it.
+    """
+    chosen = tools
+    if menu_preloaded:
+        chosen = [t for t in chosen if getattr(t, "name", "") != "get_menu"]
+    if not has_cart:
+        chosen = [t for t in chosen if getattr(t, "name", "") not in CART_ONLY_TOOLS]
+    return chosen
 
 
 class TenantMiddleware(AgentMiddleware):
@@ -75,17 +69,17 @@ class TenantMiddleware(AgentMiddleware):
     ) -> ModelResponse:
         business_id = ctx_dict(request.runtime).get("business_id")
         prompt = _FALLBACK_PROMPT
+        menu_preloaded = False
         if business_id:
-            async with SessionLocal() as s:
-                business = await catalog.load_business_for_agent(s, uuid.UUID(business_id))
-            if business is not None:
-                prompt = render_system_prompt(_brief(business))
+            snap = await snapshot.get_snapshot(uuid.UUID(business_id))
+            if snap is not None:
+                prompt = render_system_prompt(snap.brief)
+                menu_preloaded = snap.menu_preloaded
 
-        cart = request.state.get("cart") or []
-        tools = (
-            self._tools
-            if cart
-            else [t for t in self._tools if getattr(t, "name", "") not in CART_ONLY_TOOLS]
+        tools = select_tools(
+            self._tools,
+            has_cart=bool(request.state.get("cart")),
+            menu_preloaded=menu_preloaded,
         )
         model = self._escalated if len(request.messages) > self._escalate_after else self._base
         return await handler(

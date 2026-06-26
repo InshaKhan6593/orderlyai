@@ -69,7 +69,7 @@ def test_whatsapp_connection_saves_meta_fields_without_echoing_token(client, bus
     data = {
         "mode": "test",
         "waba_id": "123456789012345",
-        "phone_number_id": "987654321098765",
+        "phone_number_id": str(uuid.uuid4().int)[:15],  # unique: one connection per number
         "display_phone_number": "+1 555 010 1234",
         "display_name": "OrderlyAI Test Bot",
         "access_token": "EAAG-test-token",
@@ -121,13 +121,14 @@ def test_whatsapp_connection_requires_token_on_first_save(client, business):
 def test_whatsapp_connection_preserves_existing_token_on_update(client, business):
     headers, business_id = business
     url = f"/api/v1/businesses/{business_id}/whatsapp-connection"
+    pnid = str(uuid.uuid4().int)[:15]
 
     created = client.put(
         url,
         json={
             "mode": "test",
             "waba_id": "123456789012345",
-            "phone_number_id": "987654321098765",
+            "phone_number_id": pnid,
             "display_name": "Old Name",
             "access_token": "EAAG-test-token",
         },
@@ -140,7 +141,7 @@ def test_whatsapp_connection_preserves_existing_token_on_update(client, business
         json={
             "mode": "test",
             "waba_id": "123456789012345",
-            "phone_number_id": "987654321098765",
+            "phone_number_id": pnid,
             "display_name": "New Name",
         },
         headers=headers,
@@ -225,7 +226,7 @@ def test_access_token_is_encrypted_at_rest(client, business):
         json={
             "mode": "test",
             "waba_id": "123456789012345",
-            "phone_number_id": "987654321098765",
+            "phone_number_id": str(uuid.uuid4().int)[:15],
             "access_token": token,
         },
         headers=headers,
@@ -387,7 +388,7 @@ def test_inbound_message_runs_agent_and_sends_reply(client, business, monkeypatc
 
     sent: list[dict] = []
 
-    async def fake_run_turn(agent, *, business_id, customer_phone, thread_id, text, confirmed=False):
+    async def fake_run_turn(agent, *, business_id, customer_phone, thread_id, text, confirmed=False, reply_id=None):
         return AgentReply(messages=[TextMessage(kind="text", body=f"You said: {text}")])
 
     async def fake_send_payloads(*, phone_number_id, access_token, payloads):
@@ -420,7 +421,7 @@ def test_duplicate_message_id_is_deduped(client, business, monkeypatch):
 
     sent: list = []
 
-    async def fake_run_turn(agent, *, business_id, customer_phone, thread_id, text, confirmed=False):
+    async def fake_run_turn(agent, *, business_id, customer_phone, thread_id, text, confirmed=False, reply_id=None):
         return AgentReply(messages=[TextMessage(kind="text", body="hi back")])
 
     async def fake_send_payloads(*, phone_number_id, access_token, payloads):
@@ -535,6 +536,10 @@ def test_agent_input_mapping():
     # A list-row product tap forwards the item name as the customer's choice.
     text, confirmed = _agent_input({"reply_id": "product:abc", "text": "Smokey Burger"})
     assert text == "Smokey Burger" and confirmed is False
+    # A reorder button tap carries the order number into a reorder instruction (never confirmed).
+    text, confirmed = _agent_input({"reply_id": "reorder:2", "text": "Reorder"})
+    assert "order #2" in text and confirmed is False
+    assert _agent_input({"reply_id": "reorder:x", "text": "Reorder"})[0] == "Please reorder my last order."
     # Plain text passes through; empty/no message is ignored.
     assert _agent_input({"reply_id": "", "text": "hi"}) == ("hi", False)
     assert _agent_input({"reply_id": "", "text": ""}) == (None, False)

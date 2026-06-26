@@ -29,8 +29,8 @@ is one **tenant**). Target scale: 100–150+ business tenants.
 | Database (Postgres 16 in Docker) | ✅ Schema + Alembic migrations applied |
 | Auth (self-managed JWT) | ✅ Done |
 | **Frontend** (Next.js) | 🚧 In progress in `web/` (Next.js 16 + Tailwind v4 + shadcn/ui). Auth, onboarding steps 1–8, WhatsApp connection setup, review/go-live, and owner dashboard routes (`/dashboard`, `/dashboard/orders`, `/dashboard/menu`, `/dashboard/customers`, `/dashboard/settings`) are built; business profile, fulfillment, menu builder, AI assistant config, order board/status updates, and settings profile are wired to the API |
-| **WhatsApp AI agent** (LangChain v1 + Claude) | 🚧 Core agent built in `api/app/agent/` (graph, tenant-scoped tools, per-tenant prompt as a LangSmith-managed template, middleware, Pydantic structured output) + tested, and **wired to the WhatsApp webhook**. Now **durable**: Postgres checkpointer, ordering-domain summarization, per-turn model-call cap. See `docs/agent/ARCHITECTURE.md` |
-| WhatsApp Cloud API integration | 🚧 Production-hardened. Connection setup + webhook (verify/signature) done; inbound messages persist to a **durable inbox** (`whatsapp_inbox`) before ACK, are **deduped** by `message_id`, **serialized + coalesced** per conversation via Postgres advisory locks, processed by the agent on the **durable Postgres checkpointer**, with **retry-safe sends** and a **sweeper** for crash recovery. Outbound has retry/backoff + Meta error handling; order-status changes notify the customer (free-form in the 24h window; templates plumbed for later). See `api/app/services/whatsapp_worker.py` |
+| **WhatsApp AI agent** (LangChain v1 + Claude) | 🚧 Core agent built in `api/app/agent/` (graph, tenant-scoped tools, per-tenant prompt as a LangSmith-managed template, middleware, Pydantic structured output) + tested, and **wired to the WhatsApp webhook**. Now **durable**: Postgres checkpointer, ordering-domain summarization, per-turn model-call cap. **Latency/context-optimized**: the menu is preloaded into the system prompt (and `get_menu` is dropped from the tool set on those turns, falling back to the tool only for very large menus), a model-agnostic `ContextEditingMiddleware` clears stale tool outputs from each model call, and a short-TTL per-tenant snapshot cache coalesces the per-turn DB loads. See `docs/agent/ARCHITECTURE.md` |
+| WhatsApp Cloud API integration | 🚧 Production-hardened. Connection setup + webhook (verify/signature) done; inbound messages persist to a **durable inbox** (`whatsapp_inbox`) before ACK, are **deduped** by `message_id`, **serialized + coalesced** per conversation via a Postgres advisory lock (held on a **dedicated pinned connection** so the work session's commits can't strand it), with **bounded drain concurrency**, processed by the agent on the **durable Postgres checkpointer**, with **retry-safe + resumable sends** and a **sweeper** for crash recovery. Outbound has retry/backoff + Meta error handling, records **failed** delivery receipts, and order-status changes notify the customer (free-form in the 24h window; templates plumbed for later). A human handoff auto-resumes after `whatsapp_handoff_mute_hours`. See `api/app/services/whatsapp_worker.py` |
 | Billing (Stripe + `plan`/`subscription`) | ❌ Not built — schema is forward-compatible (`business.plan_code` exists) |
 
 When you finish a unit of work, update this table if the status changed.
@@ -251,8 +251,11 @@ Key points:
   inbound message); proactive notifications outside it require approved templates.
 - **`whatsapp_inbox`** is the durable inbound queue for the agent: one row per inbound message, unique on
   Meta `message_id` (dedup), with `status` (pending/answered/done/failed/skipped), `attempts`, and the
-  rendered `response` (so a failed send re-delivers without re-running the agent). LangGraph's own
-  `checkpoint*` tables are created by the checkpointer's `setup()`, not Alembic.
+  rendered `response` (so a failed send re-delivers without re-running the agent). `sent_count` resumes a
+  partial multi-message send without duplicating; `sent_message_ids`/`delivery_state` (GIN-indexed) record
+  outbound **failed** delivery-status webhooks. A retention sweep purges rows + the LangGraph checkpoint for
+  conversations inactive past `whatsapp_retention_days`. LangGraph's own `checkpoint*` tables are created by
+  the checkpointer's `setup()`, not Alembic — and hold the durable chat log (there is no `messages` table).
 - pgvector/embeddings are intentionally **not** in the schema yet (added in the agent phase).
 
 ---

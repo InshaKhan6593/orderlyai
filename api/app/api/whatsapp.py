@@ -210,4 +210,7 @@ async def receive_whatsapp_webhook(
     threads = await _persist_incoming(raw_body)
     for thread_id in threads:
         background_tasks.add_task(whatsapp_worker.drain_conversation, thread_id)
+    # The same webhook also carries delivery-status receipts for messages WE sent; record
+    # failures in the background (best-effort, never blocks the ACK).
+    background_tasks.add_task(whatsapp_worker.record_statuses_from_body, raw_body)
     return {"status": "received"}

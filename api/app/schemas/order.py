@@ -6,7 +6,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field
 
 from app.schemas.common import ORMModel
 
@@ -24,6 +24,8 @@ class OrderLineIn(BaseModel):
 class OrderCreate(BaseModel):
     customer_phone: str = Field(min_length=3, max_length=32)
     customer_name: str | None = None
+    customer_email: EmailStr | None = None
+    customer_alt_phone: str | None = Field(default=None, max_length=32)
     fulfillment: str = Field(pattern="^(delivery|pickup)$")
     address: str | None = None
     zone_id: uuid.UUID | None = None
@@ -58,6 +60,8 @@ class OrderCustomerOut(ORMModel):
     id: uuid.UUID
     name: str | None
     wa_phone: str
+    email: str | None
+    alternate_phone: str | None
 
 
 class OrderZoneOut(ORMModel):

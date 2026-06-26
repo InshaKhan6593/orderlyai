@@ -26,6 +26,8 @@ class Customer(UUIDMixin, TimestampMixin, Base):
     )
     wa_phone: Mapped[str] = mapped_column(String(32), nullable=False)
     name: Mapped[str | None] = mapped_column(String(255))
+    email: Mapped[str | None] = mapped_column(String(255))
+    alternate_phone: Mapped[str | None] = mapped_column(String(32))
     default_address: Mapped[str | None] = mapped_column(Text)
     order_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     last_order_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

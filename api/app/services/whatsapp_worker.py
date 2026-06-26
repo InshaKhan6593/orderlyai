@@ -21,15 +21,22 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import func, select, text
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agent.schemas import BTN_CANCEL, BTN_CONFIRM, BTN_EDIT, ROW_PRODUCT_PREFIX
+from app.agent.schemas import (
+    BTN_CANCEL,
+    BTN_CONFIRM,
+    BTN_EDIT,
+    ROW_PRODUCT_PREFIX,
+    ROW_REORDER_PREFIX,
+)
 from app.agent.whatsapp_render import to_payloads
 from app.core.config import settings
 from app.core.crypto import decrypt_secret
@@ -44,9 +51,40 @@ _DRAIN_BATCH = 50
 # Sent only if the agent itself errors out, so the customer isn't left hanging.
 _FALLBACK_REPLY = "Sorry, I had trouble with that just now - please send that again."
 
+# One semaphore per event loop (the worker is driven from a fresh asyncio.run() loop in each
+# test; production has a single loop). Bounds concurrent drains so a webhook burst can't
+# exhaust the DB pool — each drain holds two connections (lock + work session).
+_drain_semaphores: dict[Any, asyncio.Semaphore] = {}
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _bind():
+    """The engine behind the worker's session factory — used to check out the DEDICATED
+    connection that holds the advisory lock. Reading it off ``SessionLocal`` (not importing
+    ``engine``) means tests that swap ``SessionLocal`` redirect the lock connection too."""
+    return SessionLocal.kw["bind"]
+
+
+def _drain_semaphore() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    sem = _drain_semaphores.get(loop)
+    if sem is None:
+        sem = asyncio.Semaphore(max(1, settings.whatsapp_max_concurrent_drains))
+        _drain_semaphores[loop] = sem
+    return sem
+
+
+def _synthetic_id(parsed: dict[str, Any]) -> str:
+    """A stable dedup id for the rare inbound with no Meta wamid. Hashing the salient fields
+    (not just phone+second) keeps two distinct messages from collapsing into one."""
+    basis = "|".join(
+        str(parsed.get(k, ""))
+        for k in ("phone_number_id", "from", "timestamp", "type", "text", "reply_id")
+    )
+    return f"noid:{hashlib.blake2b(basis.encode(), digest_size=8).hexdigest()}"
 
 
 def thread_id_for(business_id: Any, wa_phone: str) -> str:
@@ -75,6 +113,12 @@ def agent_input(parsed: dict[str, Any]) -> tuple[str | None, bool]:
         return "Cancel the order.", False
     if reply_id == BTN_EDIT:
         return "I'd like to edit my cart.", False
+    if reply_id.startswith(ROW_REORDER_PREFIX):
+        # "reorder:<order_no>" — the model then calls the reorder tool to rebuild the cart.
+        order_no = reply_id[len(ROW_REORDER_PREFIX) :].strip()
+        if order_no.isdigit():
+            return f"Please reorder my order #{order_no}.", False
+        return "Please reorder my last order.", False
     if reply_id.startswith(ROW_PRODUCT_PREFIX):
         return parsed.get("text") or "Tell me about that item.", False
 
@@ -164,7 +208,7 @@ async def persist_inbound(db: AsyncSession, parsed: dict[str, Any]) -> str | Non
 
     business_id = connection.business_id
     thread_id = thread_id_for(business_id, wa_phone)
-    message_id = parsed.get("message_id") or f"noid:{phone_number_id}:{parsed.get('timestamp','')}"
+    message_id = parsed.get("message_id") or _synthetic_id(parsed)
     text_for_agent, confirmed = agent_input(parsed)
 
     # Decide the row's initial status: only genuinely actionable, non-throttled messages are
@@ -285,6 +329,7 @@ async def _process_unit(
                 thread_id=owner.thread_id,
                 text=combined_text,
                 confirmed=confirmed,
+                reply_id=owner.reply_id,  # a button/list tap is never captured as a typed answer
             )
         except Exception:  # noqa: BLE001 — an LLM/agent hiccup must not crash the worker
             logger.exception("Agent run failed for %s", wa_phone)
@@ -300,17 +345,29 @@ async def _process_unit(
         # this exact reply instead of re-running the agent (which would mutate the cart again).
         owner.response = payloads
         owner.status = "answered"
+        owner.sent_count = 0
+        owner.sent_message_ids = []
         for sibling in siblings:
             sibling.status = "done"
             sibling.processed_at = _now()
         await db.commit()
 
     await _mark_read_safe(connection, token, owner)
+
+    # Resume from where a prior attempt left off so a partial multi-message send never
+    # re-delivers (duplicates) the payloads that already arrived.
+    start = owner.sent_count or 0
     result = await whatsapp_service.send_payloads(
         phone_number_id=connection.phone_number_id,
         access_token=token,
-        payloads=payloads,
+        payloads=payloads[start:],
     )
+    # Record progress + the delivered wamids (for delivery-status matching) before judging
+    # the outcome — these persist on the next commit whether we finish or retry.
+    if result.sent_ids:
+        owner.sent_message_ids = (owner.sent_message_ids or []) + result.sent_ids
+    owner.sent_count = start + result.sent
+
     if result:
         await _mark(db, [owner], "done", processed_at=_now())
         return True
@@ -329,7 +386,7 @@ async def _process_unit(
     if owner.attempts >= settings.whatsapp_inbox_max_attempts:
         await _mark(db, [owner], "failed", error=f"max send attempts (code={error_code})")
     else:
-        await db.commit()  # stays 'answered' with the stored reply → sweeper re-sends
+        await db.commit()  # stays 'answered' with the stored reply + sent_count → sweeper resumes
     return False
 
 
@@ -405,23 +462,38 @@ async def drain_conversation(thread_id: str) -> None:
 
     Non-blocking lock: if another worker/instance already holds this conversation, we return
     immediately — that holder's loop (or the sweeper) will pick up our freshly-queued rows.
+
+    The advisory lock is SESSION-scoped — tied to its DB connection — so it is held on a
+    DEDICATED connection (``lock_conn``) for the whole drain. The work session commits
+    repeatedly, and a SQLAlchemy session returns its connection to the pool on every commit
+    (and may get a different one back); sharing that session for the lock would strand it on a
+    stale connection and silently break per-conversation serialization. A raw ``connect()``
+    connection, by contrast, stays checked out for the whole ``async with`` block.
+
+    A semaphore bounds how many conversations drain at once so a webhook burst can't exhaust
+    the DB pool.
     """
     if settings.whatsapp_coalesce_seconds > 0:
         # Brief debounce so a rapid burst is drained together as one coalesced turn.
         await asyncio.sleep(settings.whatsapp_coalesce_seconds)
 
     key = _advisory_key(thread_id)
-    async with SessionLocal() as db:
-        got = await db.scalar(text("SELECT pg_try_advisory_lock(:k)"), {"k": key})
-        if not got:
-            return
-        try:
-            await _drain_locked(db, thread_id)
-        except Exception:  # noqa: BLE001 — never let a drain crash take down the caller
-            logger.exception("Drain failed for thread %s", thread_id)
-        finally:
-            await db.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": key})
-            await db.commit()
+    async with _drain_semaphore():
+        async with _bind().connect() as lock_conn:
+            got = await lock_conn.scalar(text("SELECT pg_try_advisory_lock(:k)"), {"k": key})
+            # End the lock SELECT's transaction (avoid idle-in-transaction); the session-level
+            # lock and the connection itself persist for the whole block regardless.
+            await lock_conn.commit()
+            if not got:
+                return
+            try:
+                async with SessionLocal() as db:
+                    await _drain_locked(db, thread_id)
+            except Exception:  # noqa: BLE001 — never let a drain crash take down the caller
+                logger.exception("Drain failed for thread %s", thread_id)
+            finally:
+                await lock_conn.scalar(text("SELECT pg_advisory_unlock(:k)"), {"k": key})
+                await lock_conn.commit()
 
 
 # --------------------------------------------------------------------------- #
@@ -441,12 +513,17 @@ async def sweep_once() -> int:
     """Re-drive every conversation with unfinished work. Returns how many it touched.
 
     This is the safety net: it recovers messages left ``pending`` by a crash/restart and
-    re-sends replies stuck ``answered`` by a transient send failure.
+    re-sends replies stuck ``answered`` by a transient send failure. Threads are drained
+    concurrently; the per-drain semaphore bounds how many actually run at once.
     """
     async with SessionLocal() as db:
         threads = await _pending_threads(db)
-    for thread_id in threads:
-        await drain_conversation(thread_id)
+    if not threads:
+        return 0
+    await asyncio.gather(
+        *(drain_conversation(thread_id) for thread_id in threads),
+        return_exceptions=True,  # drain already swallows; this guards the gather itself
+    )
     return len(threads)
 
 
@@ -463,4 +540,115 @@ async def sweeper_loop() -> None:
             await asyncio.sleep(interval)
     except asyncio.CancelledError:  # graceful shutdown
         logger.info("WhatsApp inbox sweeper stopped")
+        raise
+
+
+# --------------------------------------------------------------------------- #
+# Delivery-status webhooks (track outbound failures)
+# --------------------------------------------------------------------------- #
+async def record_statuses_from_body(raw_body: bytes) -> int:
+    """Record FAILED outbound deliveries from a status webhook (best-effort).
+
+    Meta accepts a send (HTTP 2xx) and only later reports a ``failed`` delivery (recipient
+    blocked us, no WhatsApp account, etc.) via a status webhook. Without this, an undelivered
+    order confirmation looks delivered. We match the failed wamid back to the reply that sent
+    it and flag the row. ``sent``/``delivered``/``read`` receipts are ignored on purpose —
+    high volume, nothing to act on.
+    """
+    try:
+        payload = json.loads(raw_body)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return 0
+    failures = [
+        s
+        for s in whatsapp_service.parse_statuses(payload)
+        if s.get("status") == "failed" and s.get("message_id")
+    ]
+    if not failures:
+        return 0
+
+    touched = 0
+    async with SessionLocal() as db:
+        for st in failures:
+            wamid = st["message_id"]
+            row = await db.scalar(
+                select(WhatsAppInbox)
+                .where(WhatsAppInbox.sent_message_ids.contains([wamid]))
+                .limit(1)
+            )
+            if row is None:
+                continue
+            row.delivery_state = "failed"
+            row.error = f"delivery failed (code={st.get('error_code')}: {st.get('error_title')})"
+            touched += 1
+            logger.warning(
+                "WhatsApp delivery FAILED to %s (msg=%s code=%s): %s",
+                st.get("recipient"), wamid, st.get("error_code"), st.get("error_title"),
+            )
+        if touched:
+            await db.commit()
+    return touched
+
+
+# --------------------------------------------------------------------------- #
+# Retention (bound inbox + checkpoint growth on permanent conversation threads)
+# --------------------------------------------------------------------------- #
+async def purge_once() -> int:
+    """Purge conversations inactive beyond the retention window: delete their inbox rows AND
+    their LangGraph checkpoint (the durable chat memory). Bounds the otherwise-unbounded
+    growth of both, since ``thread_id`` is permanent per customer. Returns threads purged.
+    """
+    days = settings.whatsapp_retention_days
+    if days <= 0:
+        return 0
+    cutoff = _now() - timedelta(days=days)
+    async with SessionLocal() as db:
+        rows = await db.execute(
+            select(WhatsAppInbox.thread_id)
+            .group_by(WhatsAppInbox.thread_id)
+            .having(func.max(WhatsAppInbox.created_at) < cutoff)
+            .limit(500)
+        )
+        stale = [r[0] for r in rows.all()]
+    if not stale:
+        return 0
+
+    # Drop the checkpoint history for each stale thread (no-op when running on in-process
+    # memory, e.g. tests / Studio).
+    from app.agent.runtime import get_durable_saver  # lazy: keep LangChain out of import
+
+    saver = get_durable_saver()
+    if saver is not None:
+        for thread_id in stale:
+            try:
+                await saver.adelete_thread(thread_id)
+            except Exception:  # noqa: BLE001 — one bad thread must not stop the purge
+                logger.exception("Checkpoint purge failed for thread %s", thread_id)
+
+    async with SessionLocal() as db:
+        await db.execute(delete(WhatsAppInbox).where(WhatsAppInbox.thread_id.in_(stale)))
+        await db.commit()
+    logger.info("Retention purged %d inactive conversation(s)", len(stale))
+    return len(stale)
+
+
+async def retention_loop() -> None:
+    """Background task: periodically purge inactive conversations until cancelled."""
+    if settings.whatsapp_retention_days <= 0:
+        logger.info("WhatsApp retention disabled (retention_days=0)")
+        return
+    interval = max(3600, settings.whatsapp_retention_sweep_hours * 3600)
+    logger.info(
+        "WhatsApp retention sweeper started (every %sh)",
+        settings.whatsapp_retention_sweep_hours,
+    )
+    try:
+        while True:
+            try:
+                await purge_once()
+            except Exception:  # noqa: BLE001
+                logger.exception("Retention purge failed")
+            await asyncio.sleep(interval)
+    except asyncio.CancelledError:  # graceful shutdown
+        logger.info("WhatsApp retention sweeper stopped")
         raise

@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
@@ -49,6 +49,11 @@ class SendResult:
     error_message: str | None = None
     retryable: bool = False
     message_id: str | None = None
+    # Batch bookkeeping, set by ``send_payloads``: how many payloads were delivered in this
+    # call and their returned wamids — so the caller can resume a partial multi-message send
+    # (without re-sending what already went out) and match delivery receipts to the reply.
+    sent: int = 0
+    sent_ids: list[str] = field(default_factory=list)
 
     def __bool__(self) -> bool:  # `if result:` / `if not result:` reads naturally
         return self.ok
@@ -133,6 +138,38 @@ def parse_incoming_message(payload: dict[str, Any]) -> dict[str, Any] | None:
     """The first inbound message in a payload (or ``None``). See ``parse_incoming_messages``."""
     messages = parse_incoming_messages(payload)
     return messages[0] if messages else None
+
+
+def parse_statuses(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Pull outbound delivery-status updates (sent/delivered/read/failed) from a webhook.
+
+    The other half of an inbound webhook: ``messages`` are handled by
+    ``parse_incoming_messages``; ``statuses`` are delivery receipts for messages WE sent,
+    keyed by the wamid we got back at send time. Each item is ``{message_id, status,
+    recipient, error_code, error_title}``.
+    """
+    out: list[dict[str, Any]] = []
+    entries = payload.get("entry")
+    if not isinstance(entries, list):
+        return out
+    for entry in entries:
+        for change in (entry or {}).get("changes") or []:
+            value = (change or {}).get("value") or {}
+            for st in value.get("statuses") or []:
+                if not isinstance(st, dict):
+                    continue
+                errors = st.get("errors") or []
+                err = errors[0] if errors and isinstance(errors[0], dict) else {}
+                out.append(
+                    {
+                        "message_id": st.get("id", ""),
+                        "status": st.get("status", ""),
+                        "recipient": st.get("recipient_id", ""),
+                        "error_code": err.get("code"),
+                        "error_title": err.get("title") or err.get("message"),
+                    }
+                )
+    return out
 
 
 def _parse_error(resp: httpx.Response) -> tuple[int | None, int | None, str | None]:
@@ -233,10 +270,15 @@ async def send_payloads(
 ) -> SendResult:
     """Send pre-rendered Graph API payloads (e.g. from ``agent.whatsapp_render``) in order.
 
-    Sends sequentially (WhatsApp preserves order this way), reusing one HTTP client. Stops
-    on the first failure so a half-reply isn't sent, and returns that failure's result.
+    Sends sequentially (WhatsApp preserves order this way), reusing one HTTP client. Stops on
+    the first failure so a half-reply isn't sent, and returns that failure's result. The
+    result's ``sent``/``sent_ids`` report how many payloads went out (and their wamids) so a
+    retry can resume from the next one instead of re-sending — and thus duplicating — messages
+    that already arrived.
     """
     async with httpx.AsyncClient(timeout=15) as client:
+        sent = 0
+        sent_ids: list[str] = []
         result = SendResult(ok=True)
         for payload in payloads:
             result = await _post_message(
@@ -246,7 +288,12 @@ async def send_payloads(
                 client=client,
             )
             if not result:
-                return result
+                break
+            sent += 1
+            if result.message_id:
+                sent_ids.append(result.message_id)
+        result.sent = sent
+        result.sent_ids = sent_ids
         return result
 
 

@@ -26,6 +26,9 @@ class BusinessBrief:
     categories_summary: str = ""
     extra_instructions: str | None = None
     handoff_phone: str | None = None
+    # The pre-rendered menu index (name/price/tags/id), inlined into the prompt when it fits
+    # the preload budget. None → the menu is fetched on demand via the get_menu tool instead.
+    menu_index: str | None = None
 
 
 def _fulfillment_line(b: BusinessBrief) -> str:
@@ -36,6 +39,23 @@ def _fulfillment_line(b: BusinessBrief) -> str:
     if b.offers_pickup:
         return "You offer pickup only (no delivery)."
     return "You are not currently offering delivery or pickup."
+
+
+def _menu_block(b: BusinessBrief) -> str:
+    """The menu section: the live menu inlined when available, else a pointer to get_menu.
+
+    Inlining lets the agent answer menu questions straight from context instead of
+    round-tripping the get_menu tool every time (the runtime also drops get_menu from the
+    tool set on those turns — see ``TenantMiddleware``)."""
+    if b.menu_index:
+        return (
+            "CURRENT MENU (already loaded — use these exact items, prices, and ids; "
+            f"do NOT call get_menu):\n{b.menu_index}"
+        )
+    return (
+        "MENU ACCESS: the menu is not inlined here — call get_menu (optionally with a "
+        "category) to see the current items, prices, and ids before using them."
+    )
 
 
 # The full system-prompt template (with f-string `{placeholders}`), assembled from the
@@ -63,6 +83,7 @@ def prompt_variables(b: BusinessBrief) -> dict[str, str]:
         "packaging_fee": b.packaging_fee,
         "min_order_amount": b.min_order_amount,
         "status_note": status_note,
+        "menu_block": _menu_block(b),
         "greeting": b.greeting,
         "categories_summary": b.categories_summary or "(none set up yet)",
         "upsell_line": S.UPSELL_ON if b.upsell_enabled else S.UPSELL_OFF,

@@ -93,6 +93,22 @@ def test_categories_listed_in_prompt():
     assert "category" in p.lower()
 
 
+def test_menu_not_inlined_points_to_get_menu():
+    # With no inlined menu (large menu / unknown size), the prompt tells the model to fetch it.
+    p = build_system_prompt(_brief())  # menu_index defaults to None
+    assert "MENU ACCESS" in p
+    assert "call get_menu" in p
+
+
+def test_menu_inlined_when_provided_and_blocks_refetch():
+    # A small menu is inlined verbatim, and the model is told NOT to re-fetch it.
+    menu = "Available menu:\n\nMains:\n  - Burger - 850 PKR [id: abc-123]"
+    p = build_system_prompt(_brief(menu_index=menu))
+    assert "CURRENT MENU" in p
+    assert "do NOT call get_menu" in p
+    assert "Burger - 850 PKR [id: abc-123]" in p
+
+
 def test_whatsapp_output_rules_present():
     # WhatsApp-compatibility rules the model must follow: single-asterisk bold, product: row
     # ids, and the 10-row list cap.
@@ -125,3 +141,24 @@ def test_prompt_requires_single_valid_structured_reply():
     assert "exactly one AgentReply tool call" in p
     assert "valid JSON" in p
     assert "No extra text outside AgentReply" in p
+
+
+def test_prompt_describes_reordering():
+    # The agent must know how to show past orders (with items) and repeat one via the reorder tool.
+    p = build_system_prompt(_brief())
+    assert "PAST ORDERS & REORDERING" in p
+    assert "reorder" in p
+    assert "get_order_status" in p
+    # The reorder button id contract: "reorder:" + the order number.
+    assert "reorder:" in p
+
+
+def test_prompt_describes_automatic_confirm_buttons():
+    # Regression: the confirm buttons are rendered by the SYSTEM (run_turn), not hand-built by
+    # the model — and the model must never reference a button that isn't in the reply (the old
+    # dead-end where it sent text "tap the Confirm button above" but no actual button). A typed
+    # confirmation is not a tap.
+    p = build_system_prompt(_brief())
+    assert "SYSTEM adds them automatically" in p
+    assert "never tell the customer to tap a button that is not in the reply" in p
+    assert "is NOT a tap" in p

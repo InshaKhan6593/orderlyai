@@ -1,6 +1,18 @@
 """Pytest fixtures: isolated test DB (created/dropped per session) + TestClient."""
 from __future__ import annotations
 
+import os
+
+# Must be set BEFORE app.core.config is imported (Settings reads env at import time). Keeps the
+# app lifespan from starting the durable agent / Postgres checkpointer / inbox sweeper during
+# tests — those would touch the dev DB and need network. The webhook's per-request drain is
+# still exercised (tests stub the agent + send path).
+os.environ.setdefault("RUN_AGENT_WORKER", "false")
+os.environ.setdefault("WHATSAPP_DURABLE_MEMORY", "false")
+# Don't fire WhatsApp order-status notifications during order tests (no connection set up;
+# the notification test enables this explicitly).
+os.environ.setdefault("WHATSAPP_NOTIFY_ON_STATUS_CHANGE", "false")
+
 import asyncio
 import uuid
 

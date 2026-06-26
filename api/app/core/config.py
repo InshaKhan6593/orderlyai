@@ -57,6 +57,59 @@ class Settings(BaseSettings):
     agent_escalation_model: str = "anthropic/claude-opus-4.1"
     agent_summary_model: str = "anthropic/claude-3.5-haiku"
 
+    # Summarization (history compaction). Trigger when the running history reaches
+    # `trigger_tokens`; keep the most recent `keep_messages` verbatim; trim the block
+    # handed to the summary model to `trim_tokens`. See app/agent/runtime.py.
+    agent_summary_trigger_tokens: int = 6000
+    agent_summary_keep_messages: int = 30
+    agent_summary_trim_tokens: int = 6000
+    # Per-turn ceiling on model calls (loop/cost guard) — see ModelCallLimitMiddleware.
+    agent_max_model_calls: int = 12
+    # Disable "thinking/reasoning" mode for OpenRouter models. The agent forces a structured
+    # `AgentReply` tool call (tool_choice=required), which reasoning models (Qwen3 *thinking*,
+    # DeepSeek-R1, etc.) REJECT in thinking mode — causing a 400. Disabling reasoning makes
+    # those models usable (and faster); ignored by non-reasoning models. See app/agent/runtime.py.
+    agent_disable_reasoning: bool = True
+
+    # Agent durable memory + inbound worker.
+    # `whatsapp_durable_memory`: use the Postgres checkpointer (survives restarts) instead
+    # of the in-process MemorySaver. `run_agent_worker`: on app startup, build the durable
+    # agent and start the inbox sweeper. Both are disabled in tests (RUN_AGENT_WORKER=false).
+    whatsapp_durable_memory: bool = True
+    run_agent_worker: bool = True
+
+    # Inbound message processing (durable inbox + per-conversation serialization).
+    # `coalesce_seconds`: brief debounce so a burst of rapid messages is answered as one
+    # turn (0 = process promptly). `inbox_max_attempts`: give up + dead-letter after N
+    # failures. `inbox_sweep_seconds`: how often the background sweeper re-drives pending
+    # rows (crash recovery / lock-contention backstop).
+    whatsapp_coalesce_seconds: float = 0.0
+    whatsapp_inbox_max_attempts: int = 5
+    whatsapp_inbox_sweep_seconds: int = 30
+    # Meta's free-form customer-service window. Outside it, only template messages send.
+    whatsapp_customer_window_hours: int = 24
+    # Per-customer inbound rate limit (protects LLM spend from a flood/spam).
+    whatsapp_rate_limit_per_min: int = 20
+    # Outbound send retries (transient Graph API / network errors).
+    whatsapp_send_max_retries: int = 3
+
+    # Notify the customer on WhatsApp when an order's status changes (accepted/ready/etc.).
+    whatsapp_notify_on_status_change: bool = True
+
+    # Proactive notifications outside the 24h window need pre-approved templates. Leave
+    # unset to skip out-of-window pushes (in-window confirmations/updates still send as
+    # free-form text). Set the approved template names + language to enable them later.
+    whatsapp_template_lang: str = "en"
+    whatsapp_order_confirm_template: str | None = None
+    whatsapp_order_status_template: str | None = None
+
+    # Agent prompt management (LangSmith Prompt Hub). Code is the source of truth: the
+    # in-code template is pushed to `agent_prompt_name` by `sync_prompt.py` (versioning,
+    # Playground, evals). Set `agent_prompt_ref` (e.g. "orderlyai-agent:production") to
+    # pull-override the prompt at runtime; leave unset to always use the in-code template.
+    agent_prompt_name: str = "orderlyai-agent"
+    agent_prompt_ref: str | None = None
+
     # LangSmith tracing / evals (optional; off unless tracing is enabled).
     langsmith_tracing: bool = False
     langsmith_endpoint: str = "https://api.smith.langchain.com"

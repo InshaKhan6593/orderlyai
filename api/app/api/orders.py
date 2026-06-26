@@ -3,15 +3,16 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, BackgroundTasks, Query, status
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
+from app.core.config import settings
 from app.core.deps import BusinessDep, CurrentUser, DbSession
 from app.core.errors import BadRequestError
 from app.models.order import Order
 from app.schemas.order import OrderCreate, OrderOut, OrderStatusUpdate
-from app.services import order_service
+from app.services import notification_service, order_service
 
 router = APIRouter(prefix="/businesses/{business_id}/orders", tags=["orders"])
 
@@ -28,7 +29,12 @@ async def list_orders(
     stmt = (
         select(Order)
         .where(Order.business_id == business.id)
-        .options(selectinload(Order.items), selectinload(Order.status_history))
+        .options(
+            selectinload(Order.customer),
+            selectinload(Order.zone),
+            selectinload(Order.items),
+            selectinload(Order.status_history),
+        )
         .order_by(Order.created_at.desc())
         .limit(limit)
         .offset(offset)
@@ -60,8 +66,15 @@ async def update_order_status(
     business: BusinessDep,
     user: CurrentUser,
     db: DbSession,
+    background_tasks: BackgroundTasks,
 ) -> Order:
     # Lock the row so concurrent status changes serialize, and record the
     # authenticated user as the auditor (never a client-supplied value).
     order = await order_service.load_order(db, business.id, order_id, for_update=True)
-    return await order_service.update_status(db, order, data.status, changed_by=str(user.id))
+    updated = await order_service.update_status(db, order, data.status, changed_by=str(user.id))
+    # Tell the customer on WhatsApp (best-effort, after the response — never blocks the owner).
+    if settings.whatsapp_notify_on_status_change:
+        background_tasks.add_task(
+            notification_service.notify_order_status, business.id, updated.id
+        )
+    return updated

@@ -26,6 +26,7 @@ from app.models.base import Base, TimestampMixin, UUIDMixin
 if TYPE_CHECKING:
     from app.models.business import Business
     from app.models.customer import Customer
+    from app.models.ops import DeliveryZone
 
 ORDER_STATUSES = (
     "pending",
@@ -82,6 +83,7 @@ class Order(UUIDMixin, TimestampMixin, Base):
 
     business: Mapped["Business"] = relationship(back_populates="orders")
     customer: Mapped["Customer"] = relationship(back_populates="orders")
+    zone: Mapped["DeliveryZone | None"] = relationship()
     items: Mapped[list["OrderItem"]] = relationship(
         back_populates="order", cascade="all, delete-orphan"
     )

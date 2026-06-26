@@ -54,6 +54,20 @@ class OrderStatusHistoryOut(ORMModel):
     created_at: datetime
 
 
+class OrderCustomerOut(ORMModel):
+    id: uuid.UUID
+    name: str | None
+    wa_phone: str
+
+
+class OrderZoneOut(ORMModel):
+    id: uuid.UUID
+    name: str
+    fee: Decimal
+    min_order: Decimal
+    eta_minutes: int | None
+
+
 class OrderOut(ORMModel):
     id: uuid.UUID
     business_id: uuid.UUID
@@ -72,5 +86,7 @@ class OrderOut(ORMModel):
     payment_status: str
     notes: str | None
     created_at: datetime
+    customer: OrderCustomerOut
+    zone: OrderZoneOut | None
     items: list[OrderItemOut] = Field(default_factory=list)
     status_history: list[OrderStatusHistoryOut] = Field(default_factory=list)

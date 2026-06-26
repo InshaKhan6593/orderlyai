@@ -29,6 +29,9 @@ class Customer(UUIDMixin, TimestampMixin, Base):
     default_address: Mapped[str | None] = mapped_column(Text)
     order_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     last_order_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # When the customer last messaged us — the start of Meta's 24h free-form window. After
+    # 24h, proactive messages must be pre-approved templates (see whatsapp notifications).
+    last_inbound_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     marketing_opt_in: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     notes: Mapped[str | None] = mapped_column(Text)
 

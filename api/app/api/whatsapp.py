@@ -1,4 +1,10 @@
-"""WhatsApp Cloud API connection setup and webhook entrypoint."""
+"""WhatsApp Cloud API connection setup and webhook entrypoint.
+
+The webhook does as little as possible synchronously: verify the signature, durably record
+every inbound message to the inbox (``whatsapp_worker.persist_inbound``), ACK Meta, then
+drain each affected conversation in the background. All the hard parts — dedup, ordering,
+coalescing, retries, crash recovery — live in ``app.services.whatsapp_worker``.
+"""
 from __future__ import annotations
 
 import hashlib
@@ -6,25 +12,20 @@ import hmac
 import json
 import logging
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
 from sqlalchemy import select
 
 from app.core.config import settings
-from app.core.crypto import decrypt_secret, encrypt_secret
+from app.core.crypto import encrypt_secret
+from app.core.db import SessionLocal
 from app.core.deps import BusinessDep, DbSession
 from app.core.errors import BadRequestError
 from app.models.whatsapp import WhatsAppConnection
 from app.schemas.whatsapp import WhatsAppConnectionIn, WhatsAppConnectionOut
-from app.services import whatsapp_service
+from app.services import whatsapp_service, whatsapp_worker
 
 logger = logging.getLogger(__name__)
-
-# Placeholder auto-reply until the LangGraph + Claude ordering agent is built.
-_PLACEHOLDER_REPLY = (
-    "Thanks for your message! Our ordering assistant isn't live just yet — "
-    "we've received what you sent and someone will follow up soon."
-)
 
 router = APIRouter(prefix="/businesses/{business_id}/whatsapp-connection", tags=["whatsapp"])
 webhook_router = APIRouter(prefix="/whatsapp", tags=["whatsapp"])
@@ -152,43 +153,46 @@ def _valid_signature(secret: str, body: bytes, header: str) -> bool:
     return hmac.compare_digest(expected, header[len(prefix) :])
 
 
-async def _reply_to_incoming(db: DbSession, raw_body: bytes) -> None:
-    """Parse an inbound message and send the placeholder reply for its tenant.
+# Re-exported so the parse→agent-input mapping has one home (the worker) but stays importable
+# from here for tests and callers.
+_agent_input = whatsapp_worker.agent_input
 
-    Routes by ``metadata.phone_number_id`` so the correct business's (decrypted)
-    token is used. Status notifications and non-message payloads are ignored.
+
+async def _persist_incoming(raw_body: bytes) -> list[str]:
+    """Durably record every inbound message in the payload; return threads needing a drain.
+
+    Runs INSIDE the request, before we ACK Meta — so a crash right after the 200 can never
+    lose a message (Meta won't redeliver an ACKed webhook; our sweeper re-drives the inbox).
+    Duplicates, status notifications, and non-actionable messages persist (or are ignored)
+    without queueing agent work.
     """
     try:
         payload = json.loads(raw_body)
     except json.JSONDecodeError:
-        return
+        return []
 
-    parsed = whatsapp_service.parse_incoming_message(payload)
-    if not parsed or not parsed["from"] or not parsed["phone_number_id"]:
-        return
+    messages = whatsapp_service.parse_incoming_messages(payload)
+    if not messages:
+        return []  # status update (sent/delivered/read) or empty payload
 
-    row = await db.execute(
-        select(WhatsAppConnection).where(
-            WhatsAppConnection.phone_number_id == parsed["phone_number_id"]
-        )
-    )
-    connection = row.scalars().first()
-    if connection is None or not connection.access_token:
-        logger.warning(
-            "No WhatsApp connection for phone_number_id=%s", parsed["phone_number_id"]
-        )
-        return
-
-    await whatsapp_service.send_text(
-        phone_number_id=parsed["phone_number_id"],
-        access_token=decrypt_secret(connection.access_token),
-        to=parsed["from"],
-        body=_PLACEHOLDER_REPLY,
-    )
+    threads: list[str] = []
+    async with SessionLocal() as db:
+        for parsed in messages:
+            try:
+                thread_id = await whatsapp_worker.persist_inbound(db, parsed)
+            except Exception:  # noqa: BLE001 — one bad message must not drop the rest
+                await db.rollback()
+                logger.exception("Failed to persist inbound message %s", parsed.get("message_id"))
+                continue
+            if thread_id and thread_id not in threads:
+                threads.append(thread_id)
+    return threads
 
 
 @webhook_router.post("/webhook")
-async def receive_whatsapp_webhook(request: Request, db: DbSession) -> dict[str, str]:
+async def receive_whatsapp_webhook(
+    request: Request, background_tasks: BackgroundTasks
+) -> dict[str, str]:
     secret = settings.whatsapp_app_secret
     if not secret:
         # Fail closed: a publicly reachable webhook whose payloads cannot be
@@ -200,10 +204,10 @@ async def receive_whatsapp_webhook(request: Request, db: DbSession) -> dict[str,
     if not _valid_signature(secret, raw_body, signature):
         raise HTTPException(status_code=403, detail="Invalid webhook signature")
 
-    # Always ACK 200 to Meta; downstream failures must not trigger retries.
-    try:
-        await _reply_to_incoming(db, raw_body)
-    except Exception:  # noqa: BLE001 — never let processing break the ACK
-        logger.exception("WhatsApp webhook processing failed")
-
+    # Persist first (durability), then ACK, then drain each conversation in the background so
+    # a slow agent turn never delays the 200. The per-conversation advisory lock in the worker
+    # keeps a customer's back-to-back messages serialized and coalesced.
+    threads = await _persist_incoming(raw_body)
+    for thread_id in threads:
+        background_tasks.add_task(whatsapp_worker.drain_conversation, thread_id)
     return {"status": "received"}

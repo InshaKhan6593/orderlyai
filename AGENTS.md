@@ -28,9 +28,9 @@ is one **tenant**). Target scale: 100–150+ business tenants.
 | **Backend CMS API** (`api/`) | ✅ Built, running, and tested (90 passing tests) |
 | Database (Postgres 16 in Docker) | ✅ Schema + Alembic migrations applied |
 | Auth (self-managed JWT) | ✅ Done |
-| **Frontend** (Next.js) | 🚧 In progress in `web/` (Next.js 16 + Tailwind v4 + shadcn/ui). Auth plus onboarding steps 1–6 are built; business profile, fulfillment, menu builder, and AI assistant config are wired to the API |
-| **WhatsApp AI agent** (LangChain v1 + Claude) | 🚧 Core agent built in `api/app/agent/` (graph, tenant-scoped tools, per-tenant prompt, middleware, Pydantic structured output) + tested. Not yet wired to the webhook/worker. See `docs/agent/ARCHITECTURE.md` |
-| WhatsApp Cloud API integration | ❌ Not built yet |
+| **Frontend** (Next.js) | 🚧 In progress in `web/` (Next.js 16 + Tailwind v4 + shadcn/ui). Auth, onboarding steps 1–8, WhatsApp connection setup, review/go-live, and owner dashboard routes (`/dashboard`, `/dashboard/orders`, `/dashboard/menu`, `/dashboard/customers`, `/dashboard/settings`) are built; business profile, fulfillment, menu builder, AI assistant config, order board/status updates, and settings profile are wired to the API |
+| **WhatsApp AI agent** (LangChain v1 + Claude) | 🚧 Core agent built in `api/app/agent/` (graph, tenant-scoped tools, per-tenant prompt as a LangSmith-managed template, middleware, Pydantic structured output) + tested, and **wired to the WhatsApp webhook**. Now **durable**: Postgres checkpointer, ordering-domain summarization, per-turn model-call cap. See `docs/agent/ARCHITECTURE.md` |
+| WhatsApp Cloud API integration | 🚧 Production-hardened. Connection setup + webhook (verify/signature) done; inbound messages persist to a **durable inbox** (`whatsapp_inbox`) before ACK, are **deduped** by `message_id`, **serialized + coalesced** per conversation via Postgres advisory locks, processed by the agent on the **durable Postgres checkpointer**, with **retry-safe sends** and a **sweeper** for crash recovery. Outbound has retry/backoff + Meta error handling; order-status changes notify the customer (free-form in the 24h window; templates plumbed for later). See `api/app/services/whatsapp_worker.py` |
 | Billing (Stripe + `plan`/`subscription`) | ❌ Not built — schema is forward-compatible (`business.plan_code` exists) |
 
 When you finish a unit of work, update this table if the status changed.
@@ -93,6 +93,7 @@ orderlyai/
     ├── .env / .env.example    # config (DATABASE_URL, JWT_SECRET, CORS, …)
     ├── Dockerfile             # for later deployment
     ├── smoke.py               # end-to-end smoke script (uv run python smoke.py)
+    ├── sync_prompt.py         # push the in-code agent prompt to LangSmith (uv run python sync_prompt.py)
     ├── migrations/            # Alembic (async env.py)
     │   └── versions/
     ├── tests/                 # pytest: conftest + test_auth/test_orders/test_tenant_isolation
@@ -128,9 +129,30 @@ uv sync                                                       # install deps int
 uv run alembic upgrade head                                   # apply migrations
 uv run uvicorn app.main:app --reload --reload-dir app --port 8000
 #   ↑ --reload-dir app is REQUIRED: otherwise uvicorn watches .venv and reload-loops
+
+# To exercise the WhatsApp agent with DURABLE memory locally (the Postgres checkpointer),
+# use the launcher instead — on Windows it runs uvicorn inside a SelectorEventLoop so
+# psycopg async works (the plain CLI above falls back to in-process memory on Windows):
+uv run python run.py --no-reload                             # honors PORT/HOST env
 ```
 
 - API docs: http://localhost:8000/docs  ·  Health: http://localhost:8000/health
+- WhatsApp webhook tunnel (run in a second PowerShell after the API is listening on `:8000`; it can run from
+  any directory, but use the repo root for consistency):
+
+```powershell
+cd "C:\Users\Insha Khan\orderlyai"
+& "C:\Users\Insha Khan\AppData\Local\Microsoft\WindowsApps\ngrok.ngrok_1g87z0zv29zzc\ngrok.exe" http 8000
+```
+
+- Meta callback URL format: `https://<ngrok-host>.ngrok-free.app/api/v1/whatsapp/webhook`.
+- Meta verify token: use `WHATSAPP_VERIFY_TOKEN` from `api/.env` (do not hardcode the real token in docs or
+  commits). To view it locally:
+
+```powershell
+Select-String -Path "C:\Users\Insha Khan\orderlyai\api\.env" -Pattern "^WHATSAPP_VERIFY_TOKEN="
+```
+
 - Tests: `uv run pytest`  (uses a separate `orderlyai_test` database, created/dropped per session)
 - Smoke: `uv run python smoke.py`
 - New migration: `uv run alembic revision --autogenerate -m "msg"` then review the file, then `upgrade head`.
@@ -225,6 +247,12 @@ Key points:
 - **`orders`**: `order_no` is unique per business; `order_items` **snapshot** `name_snapshot` + `price_snapshot`
   + chosen `options_json` so historical orders never change when the menu changes; `order_status_history`
   records every transition.
+- **`customers.last_inbound_at`** tracks the start of Meta's 24h free-form messaging window (set on every
+  inbound message); proactive notifications outside it require approved templates.
+- **`whatsapp_inbox`** is the durable inbound queue for the agent: one row per inbound message, unique on
+  Meta `message_id` (dedup), with `status` (pending/answered/done/failed/skipped), `attempts`, and the
+  rendered `response` (so a failed send re-delivers without re-running the agent). LangGraph's own
+  `checkpoint*` tables are created by the checkpointer's `setup()`, not Alembic.
 - pgvector/embeddings are intentionally **not** in the schema yet (added in the agent phase).
 
 ---
@@ -307,6 +335,12 @@ Key points:
   checks from `web/` before claiming the work is complete.
 - **When you add a tenant resource, add an isolation test** (an outsider must get 403). When you add pricing or
   status logic, assert the numbers/transitions.
+- **WhatsApp agent worker** (`test_agent_worker.py`, `test_whatsapp_connection.py`): durable dedup by
+  `message_id`, back-to-back coalescing + ordering, confirm-tap as its own turn, retry-safe re-send (agent
+  runs once), per-customer rate limit, multi-message parsing + location/media mapping, outbound retry/backoff
+  + Meta error handling, and order-status notifications (in/out of the 24h window). Tests set
+  `RUN_AGENT_WORKER=false` so the lifespan never starts the durable agent/sweeper; the per-request drain is
+  driven directly against the test DB with the agent + Graph API calls stubbed.
 
 ---
 
@@ -343,9 +377,8 @@ Key points:
 
 ## 14. Roadmap & design docs
 
-**Next up (in order):** continue the frontend (`web/`) with onboarding steps 6–8, dashboard menu
-management reuse, and dashboard screens → WhatsApp AI agent (LangGraph + Claude, inside `api/`) → WhatsApp Cloud API
-webhook/worker → billing (Stripe).
+**Next up (in order):** continue the frontend (`web/`) with deeper dashboard menu editor reuse, richer
+dashboard screens, and production auth hardening → WhatsApp AI agent/runtime hardening → billing (Stripe).
 
 **Full product/design source of truth** (research, architecture, exact schema, UI screen-generation prompts,
 build prompts, dashboard prompts) lives **outside this repo** at:

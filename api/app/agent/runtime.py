@@ -10,18 +10,23 @@ Anthropic per settings (see ``_make_model``).
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
 from functools import lru_cache
 from typing import Any
 
 from langchain.agents import create_agent  # type: ignore[import-not-found]
-from langchain.agents.middleware import SummarizationMiddleware  # type: ignore[import-not-found]
+from langchain.agents.middleware import (  # type: ignore[import-not-found]
+    ModelCallLimitMiddleware,
+    SummarizationMiddleware,
+)
 from langchain.agents.structured_output import ToolStrategy  # type: ignore[import-not-found]
 from langchain.chat_models import init_chat_model  # type: ignore[import-not-found]
 
 from app.agent.context import AgentContext
 from app.agent.middleware import TenantMiddleware
+from app.agent.prompts import ORDERING_SUMMARY_PROMPT
 from app.agent.schemas import AgentReply
 from app.agent.state import OrderingState
 from app.agent.tools import TOOLS
@@ -57,12 +62,17 @@ def _make_model(model_id: str) -> Any:
     if settings.llm_provider == "openrouter":
         from langchain_openai import ChatOpenAI
 
+        # Turn off reasoning/thinking on OpenRouter. The agent forces a structured AgentReply
+        # tool call (tool_choice=required); reasoning models reject that in thinking mode (400).
+        # OpenRouter ignores `reasoning` for models that don't support it, so this is safe.
+        extra_body = {"reasoning": {"enabled": False}} if settings.agent_disable_reasoning else None
         return ChatOpenAI(
             model=model_id,
             base_url=settings.openrouter_base_url,
             api_key=settings.openrouter_api_key,
             temperature=0,
             default_headers={"X-Title": settings.app_name},
+            extra_body=extra_body,
         )
     return init_chat_model(model_id, temperature=0)
 
@@ -89,10 +99,21 @@ def build_agent(*, checkpointer: Any = None):
         context_schema=AgentContext,
         response_format=ToolStrategy(AgentReply),
         middleware=[
+            # Loop/cost guard: never let one inbound turn run away with tool calls.
+            ModelCallLimitMiddleware(
+                thread_limit=None,
+                run_limit=settings.agent_max_model_calls,
+                exit_behavior="error",
+            ),
+            # Compaction with an ordering-domain prompt (LangChain's default is a generic
+            # coding-agent prompt that drops order-relevant context). Keep recent turns
+            # verbatim; summarize the rest into customer/order/state notes.
             SummarizationMiddleware(
                 model=summary,
-                trigger=("tokens", 6000),
-                keep=("messages", 16),
+                trigger=("tokens", settings.agent_summary_trigger_tokens),
+                keep=("messages", settings.agent_summary_keep_messages),
+                summary_prompt=ORDERING_SUMMARY_PROMPT,
+                trim_tokens_to_summarize=settings.agent_summary_trim_tokens,
             ),
             TenantMiddleware(TOOLS, main, escalated),
         ],
@@ -100,8 +121,110 @@ def build_agent(*, checkpointer: Any = None):
     )
 
 
+# Process-wide durable agent, created at app startup (see ``start_durable_agent``). Holds the
+# psycopg connection pool that backs the Postgres checkpointer so it can be closed on shutdown.
+_DURABLE: dict[str, Any] = {"pool": None, "agent": None}
+
+
+@lru_cache(maxsize=1)
+def _memory_agent():
+    """Fallback agent on an in-process MemorySaver — for the CLI, LangGraph Studio, and tests
+    (no Postgres, state lost on restart). Production uses the durable agent below."""
+    from langgraph.checkpoint.memory import MemorySaver  # local import: keeps API import light
+
+    return build_agent(checkpointer=MemorySaver())
+
+
+def get_whatsapp_agent():
+    """The shared agent for the WhatsApp worker, reused across messages.
+
+    Returns the durable Postgres-backed agent once ``start_durable_agent`` has run (the normal
+    production path: carts, conversation history, and the handoff flag survive restarts and are
+    shared across instances). Falls back to the in-process MemorySaver agent otherwise.
+    """
+    if _DURABLE["agent"] is not None:
+        return _DURABLE["agent"]
+    return _memory_agent()
+
+
+async def start_durable_agent():
+    """Build the agent on a pooled Postgres checkpointer and create its tables (idempotent).
+
+    Called once from the app lifespan. A connection *pool* (not a single connection) is
+    required so concurrent conversations can read/write checkpoints safely.
+    """
+    if _DURABLE["agent"] is not None:
+        return _DURABLE["agent"]
+
+    # Fail fast on an incompatible loop (Windows ProactorEventLoop) instead of a 30s pool
+    # timeout, so the caller can fall back to in-process memory immediately with a clear reason.
+    loop = asyncio.get_running_loop()
+    if type(loop).__name__ == "ProactorEventLoop":
+        raise RuntimeError(
+            "Durable Postgres memory needs a SelectorEventLoop, but the running loop is "
+            "ProactorEventLoop (Windows default). Start the server via app.main (which sets "
+            "WindowsSelectorEventLoopPolicy) or run on Linux."
+        )
+
+    from psycopg.rows import dict_row  # local imports: only when durable memory is enabled
+    from psycopg_pool import AsyncConnectionPool
+    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+    # The checkpointer uses psycopg (not asyncpg), so strip the SQLAlchemy driver tag.
+    dsn = settings.database_url.replace("postgresql+asyncpg://", "postgresql://")
+    # AsyncPostgresSaver requires autocommit + dict rows + no prepared-statement caching.
+    pool = AsyncConnectionPool(
+        conninfo=dsn,
+        max_size=10,
+        open=False,
+        kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
+    )
+    await pool.open(wait=True, timeout=10)
+    saver = AsyncPostgresSaver(pool)
+    await saver.setup()  # creates checkpoint tables on first run; no-op thereafter
+    _DURABLE["pool"] = pool
+    _DURABLE["agent"] = build_agent(checkpointer=saver)
+    return _DURABLE["agent"]
+
+
+async def stop_durable_agent() -> None:
+    """Tear down the durable agent's connection pool (called from the app lifespan)."""
+    pool = _DURABLE.pop("pool", None)
+    _DURABLE["agent"] = None
+    if pool is not None:
+        await pool.close()
+
+
 def thread_id_for(business_id: uuid.UUID | str, wa_phone: str) -> str:
     return f"{business_id}:{wa_phone}"
+
+
+def _message_value(message: Any, key: str) -> Any:
+    if isinstance(message, dict):
+        return message.get(key)
+    return getattr(message, key, None)
+
+
+def _has_current_structured_response(result: dict[str, Any]) -> bool:
+    """ToolStrategy stores AgentReply as a tool message; reject stale prior-turn output."""
+    messages = result.get("messages") or []
+    if not messages:
+        return True
+
+    latest_human = -1
+    for index, message in enumerate(messages):
+        if _message_value(message, "type") == "human" or _message_value(message, "role") == "user":
+            latest_human = index
+    if latest_human < 0:
+        return True
+
+    for message in messages[latest_human + 1 :]:
+        if _message_value(message, "type") != "tool" or _message_value(message, "name") != "AgentReply":
+            continue
+        content = str(_message_value(message, "content") or "")
+        if content.startswith("Returning structured response:"):
+            return True
+    return False
 
 
 async def run_turn(
@@ -133,7 +256,10 @@ async def run_turn(
         config,
         context=AgentContext(business_id=str(business_id), customer_phone=customer_phone),
     )
-    return result.get("structured_response")
+    reply = result.get("structured_response")
+    if reply is not None and not _has_current_structured_response(result):
+        raise RuntimeError("Agent did not produce a valid structured response for the latest turn.")
+    return reply
 
 
 def get_checkpointer():

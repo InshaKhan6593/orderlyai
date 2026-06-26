@@ -59,21 +59,40 @@ def _msg(text: str, runtime: ToolRuntime, **state: object) -> Command:
 # --------------------------------------------------------------------------- #
 # Read tools
 # --------------------------------------------------------------------------- #
-@tool
+@tool(parse_docstring=True)
 async def get_menu(category: str | None = None, runtime: ToolRuntime = None) -> str:  # type: ignore[assignment]
-    """Show the available menu (items + prices + ids). The menu is small — use this to
-    browse and to answer "what's vegetarian / spicy / cheap"; filter the items yourself."""
+    """List the menu — the whole menu, or just one category. Items show price, owner tags, id.
+
+    The business's categories are named in your instructions. Map the customer's request
+    (e.g. "burgers", "fast food", "something sweet") to the closest of THOSE categories and
+    pass it as `category`. Omit `category` for the full menu, or to answer cross-category
+    questions ("what's vegetarian / cheap"); read the owner tags in brackets to filter. If the
+    category name doesn't exist, the reply lists the real categories so you can map or ask.
+    Always call this before add_to_cart so you use real product ids.
+
+    Args:
+        category: A category name to show only that section (case-insensitive). Omit for the
+            full menu.
+    """
     async with SessionLocal() as s:
         b = await catalog.load_business_for_agent(s, _bid(runtime))
         if b is None:
             return "This business isn't available."
-        return await catalog.menu_overview(s, b)
+        return await catalog.menu_overview(s, b, category=category)
 
 
-@tool
+@tool(parse_docstring=True)
 async def get_item_details(product_id: str, runtime: ToolRuntime = None) -> str:  # type: ignore[assignment]
-    """Full detail for ONE item: description, price, image, and its option groups
-    (required choices and optional add-ons) with each option's price and option_id."""
+    """Get full detail for ONE menu item before ordering it.
+
+    Returns the description, price, owner tags, image, and every option group (required
+    choices and optional add-ons) with each option's price delta and option_id. Call this
+    when the customer asks about a specific dish, or before adding an item that has options,
+    so you can pass the right option ids to add_to_cart.
+
+    Args:
+        product_id: The item's id, exactly as shown by get_menu (a UUID).
+    """
     async with SessionLocal() as s:
         b = await catalog.load_business_for_agent(s, _bid(runtime))
         if b is None:
@@ -83,35 +102,30 @@ async def get_item_details(product_id: str, runtime: ToolRuntime = None) -> str:
 
 @tool
 async def check_hours(runtime: ToolRuntime = None) -> str:  # type: ignore[assignment]
-    """Whether the business is open right now, plus the weekly opening hours."""
+    """Report whether the business is open right now and list the weekly opening hours.
+
+    Call this when the customer asks if you're open, when you'll be ready, or before
+    promising fulfilment — orders cannot be placed while the business is closed.
+    """
     async with SessionLocal() as s:
         b = await catalog.load_business_for_agent(s, _bid(runtime))
         if b is None:
             return "This business isn't available."
         hours = list(b.hours)
         state = "OPEN now" if catalog.is_open_now(hours, b.timezone) else "CLOSED right now"
-        return f"{state}. Hours — {catalog.format_hours(hours)}."
+        return f"{state}. Hours - {catalog.format_hours(hours)}."
 
 
-@tool
-async def get_popular_items(limit: int = 5, runtime: ToolRuntime = None) -> str:  # type: ignore[assignment]
-    """The REAL best-selling items, computed from recent order history (NOT owner tags).
-    Use for "what's popular / most ordered / your top sellers / what's running most"."""
-    async with SessionLocal() as s:
-        b = await catalog.load_business_for_agent(s, _bid(runtime))
-        if b is None:
-            return "This business isn't available."
-        top = await catalog.popular_products(s, b, limit=max(1, min(limit, 10)))
-    if not top:
-        return "No order history yet, so there's no popularity data to report."
-    return "Most ordered recently:\n" + "\n".join(
-        f"  {i}. {name} — {qty} ordered" for i, (name, qty) in enumerate(top, start=1)
-    )
-
-
-@tool
+@tool(parse_docstring=True)
 async def get_order_status(order_no: int | None = None, runtime: ToolRuntime = None) -> str:  # type: ignore[assignment]
-    """Status of this customer's recent orders (optionally a specific order number)."""
+    """Look up the status of this customer's recent orders.
+
+    Returns up to the five most recent orders for this WhatsApp number with their status,
+    fulfillment type, and total. Use it for "where's my order / what's the status".
+
+    Args:
+        order_no: A specific order number to look up. Omit to list recent orders.
+    """
     async with SessionLocal() as s:
         b = await catalog.load_business_for_agent(s, _bid(runtime))
         if b is None:
@@ -137,15 +151,24 @@ async def get_order_status(order_no: int | None = None, runtime: ToolRuntime = N
 # --------------------------------------------------------------------------- #
 # Cart / flow tools
 # --------------------------------------------------------------------------- #
-@tool
+@tool(parse_docstring=True)
 async def add_to_cart(
     product_id: str,
     quantity: int,
     option_item_ids: list[str] | None = None,
     runtime: ToolRuntime = None,  # type: ignore[assignment]
 ) -> Command:
-    """Add an item to the cart. Pass option_item_ids for chosen sizes/add-ons.
-    Required option groups can be added later but must be set before placing the order."""
+    """Add one menu item, with any chosen options, to the cart.
+
+    Resolve the item with get_menu / get_item_details first so the ids are real. Required
+    option groups don't have to be set here, but they must be chosen before place_order.
+    The line price is computed server-side, never by you.
+
+    Args:
+        product_id: The item's id from get_menu (a UUID).
+        quantity: How many to add (1-999).
+        option_item_ids: Chosen option ids (sizes/add-ons) from get_item_details, if any.
+    """
     option_item_ids = option_item_ids or []
     if quantity < 1 or quantity > 999:
         return _msg("Quantity must be between 1 and 999.", runtime)
@@ -153,7 +176,7 @@ async def add_to_cart(
         pid = uuid.UUID(product_id)
         opt_ids = _uuids(option_item_ids)
     except (ValueError, AttributeError):
-        return _msg("That item/option id isn't valid — call get_menu first.", runtime)
+        return _msg("That item/option id isn't valid - call get_menu first.", runtime)
 
     async with SessionLocal() as s:
         products = await _load_products(s, _bid(runtime), {pid})
@@ -169,7 +192,7 @@ async def add_to_cart(
     cart = list(runtime.state.get("cart") or []) + [line]
     suffix = f" ({label})" if label else ""
     return _msg(
-        f"Added {quantity} × {pl.name}{suffix}. Cart now has {len(cart)} line(s).",
+        f"Added {quantity} x {pl.name}{suffix}. Cart now has {len(cart)} line(s).",
         runtime,
         cart=cart,
         step="building",
@@ -177,11 +200,16 @@ async def add_to_cart(
     )
 
 
-@tool
+@tool(parse_docstring=True)
 async def update_cart_quantity(
     line_index: int, quantity: int, runtime: ToolRuntime = None  # type: ignore[assignment]
 ) -> Command:
-    """Change the quantity of cart line N (1-based). Set quantity 0 to remove it."""
+    """Change the quantity of one cart line.
+
+    Args:
+        line_index: Which cart line to change, 1-based (line 1 is the first item). See view_cart.
+        quantity: The new quantity (1-999). Use 0 to remove the line entirely.
+    """
     cart = list(runtime.state.get("cart") or [])
     if line_index < 1 or line_index > len(cart):
         return _msg(f"There's no line {line_index}. The cart has {len(cart)} line(s).", runtime)
@@ -194,11 +222,15 @@ async def update_cart_quantity(
     return _msg(f"Updated line {line_index} to {quantity}.", runtime, cart=cart)
 
 
-@tool
+@tool(parse_docstring=True)
 async def remove_from_cart(
     line_index: int, runtime: ToolRuntime = None  # type: ignore[assignment]
 ) -> Command:
-    """Remove cart line N (1-based)."""
+    """Remove one line from the cart.
+
+    Args:
+        line_index: Which cart line to remove, 1-based (see view_cart for the numbering).
+    """
     cart = list(runtime.state.get("cart") or [])
     if line_index < 1 or line_index > len(cart):
         return _msg(f"There's no line {line_index}.", runtime)
@@ -206,12 +238,20 @@ async def remove_from_cart(
     return _msg(f"Removed {removed['name']}.", runtime, cart=cart)
 
 
-@tool
+@tool(parse_docstring=True)
 async def set_fulfillment(
     fulfillment: str, address: str | None = None, runtime: ToolRuntime = None  # type: ignore[assignment]
 ) -> Command:
-    """Set 'delivery' or 'pickup'. For delivery, also collect the address here, then
-    call check_delivery_area to confirm it's serviceable."""
+    """Set how the order is fulfilled: delivery or pickup.
+
+    For delivery, also collect the customer's address here and then call check_delivery_area
+    to confirm it's in a serviceable zone. Rejected if the business doesn't offer the chosen
+    method.
+
+    Args:
+        fulfillment: Either "delivery" or "pickup".
+        address: The delivery address. Required for delivery; ignored for pickup.
+    """
     fulfillment = (fulfillment or "").lower().strip()
     if fulfillment not in ("delivery", "pickup"):
         return _msg("Choose either 'delivery' or 'pickup'.", runtime)
@@ -220,21 +260,27 @@ async def set_fulfillment(
     if b is None:
         return _msg("This business isn't available.", runtime)
     if fulfillment == "delivery" and not b.offers_delivery:
-        return _msg("Sorry, we don't offer delivery — only pickup.", runtime)
+        return _msg("Sorry, we don't offer delivery - only pickup.", runtime)
     if fulfillment == "pickup" and not b.offers_pickup:
-        return _msg("Sorry, we don't offer pickup — only delivery.", runtime)
+        return _msg("Sorry, we don't offer pickup - only delivery.", runtime)
     update: dict[str, object] = {"fulfillment": fulfillment}
     if address is not None:
         update["address"] = address
     return _msg(f"Set fulfillment to {fulfillment}.", runtime, **update)
 
 
-@tool
+@tool(parse_docstring=True)
 async def check_delivery_area(
     area_or_address: str, runtime: ToolRuntime = None  # type: ignore[assignment]
 ) -> Command:
-    """Check whether an address/area is in a delivery zone. Records the matched zone
-    so the order can use its fee and minimum."""
+    """Check whether an address/area is within a delivery zone, and record the matched zone.
+
+    Call this for every delivery order before place_order: it sets the delivery fee and the
+    zone's minimum order. If no zone matches, offer pickup instead.
+
+    Args:
+        area_or_address: The customer's area name or full delivery address, in free text.
+    """
     async with SessionLocal() as s:
         b = await catalog.load_business_for_agent(s, _bid(runtime))
         if b is None:
@@ -244,7 +290,7 @@ async def check_delivery_area(
         zones = await catalog.delivery_zones(s, b)
         cur = b.currency
     if not zones:
-        return _msg("No delivery zones are set up — delivery isn't available.", runtime)
+        return _msg("No delivery zones are set up - delivery isn't available.", runtime)
     zone = catalog.match_zone(zones, area_or_address)
     if zone is None:
         names = ", ".join(z.name for z in zones)
@@ -267,8 +313,12 @@ async def check_delivery_area(
 
 @tool
 async def view_cart(runtime: ToolRuntime = None) -> str:  # type: ignore[assignment]
-    """Itemized, server-priced preview of the current cart and total. Show this BEFORE
-    asking the customer to confirm."""
+    """Show an itemized, server-priced summary of the current cart with the running total.
+
+    Always call this to show the customer their order and total BEFORE asking them to
+    confirm. Quantities, option prices, delivery, and packaging fees are all computed by the
+    server here — show these numbers, never your own.
+    """
     cart = runtime.state.get("cart") or []
     if not cart:
         return "The cart is empty."
@@ -301,7 +351,7 @@ async def view_cart(runtime: ToolRuntime = None) -> str:  # type: ignore[assignm
     out = ["Cart:"]
     for i, (c, pl) in enumerate(zip(cart, q.lines), start=1):
         opt = f" ({c['options_label']})" if c["options_label"] else ""
-        out.append(f"  {i}. {pl.quantity} × {pl.name}{opt} — {pl.line_total} {cur}")
+        out.append(f"  {i}. {pl.quantity} x {pl.name}{opt} - {pl.line_total} {cur}")
     out.append(f"Subtotal: {q.subtotal} {cur}")
     if q.delivery_fee:
         out.append(f"Delivery: {q.delivery_fee} {cur}")
@@ -313,13 +363,17 @@ async def view_cart(runtime: ToolRuntime = None) -> str:  # type: ignore[assignm
 
 @tool
 async def place_order(runtime: ToolRuntime = None) -> Command:  # type: ignore[assignment]
-    """Place the order. REFUSES unless the cart was priced and the customer confirmed,
-    fulfillment is set, and (for delivery) a serviceable address exists. Re-validates
-    everything server-side and computes the authoritative total."""
+    """Place the order — the final step. Only call this after the customer has confirmed.
+
+    REFUSES unless the cart was priced with view_cart and the customer tapped Confirm,
+    fulfillment is set, and (for delivery) a serviceable address exists. Re-validates the
+    whole cart server-side, enforces the business minimum and opening hours, and computes
+    the authoritative total before creating the order.
+    """
     state = runtime.state
     cart = state.get("cart") or []
     if not cart:
-        return _msg("The cart is empty — add items first.", runtime)
+        return _msg("The cart is empty - add items first.", runtime)
     if not state.get("confirmed"):
         return _msg(
             "I can't place the order until you've reviewed the total and tapped Confirm.",
@@ -408,11 +462,18 @@ async def place_order(runtime: ToolRuntime = None) -> Command:  # type: ignore[a
     )
 
 
-@tool
+@tool(parse_docstring=True)
 async def request_human(reason: str, runtime: ToolRuntime = None) -> Command:  # type: ignore[assignment]
-    """Hand off to a human (refunds, complaints, anything you can't do). Stops auto-replies."""
+    """Hand the conversation to a human and stop auto-replying.
+
+    Use for anything you can't do yourself: refunds, complaints, anger, or an explicit
+    request to talk to a person. After this the agent goes silent for the thread.
+
+    Args:
+        reason: A short note on why you're escalating, for the team that picks it up.
+    """
     return _msg(
-        "Okay — I've let a team member know and they'll follow up with you here.",
+        "Okay - I've let a team member know and they'll follow up with you here.",
         runtime,
         step="handed_off",
         handoff_reason=reason,
@@ -423,7 +484,6 @@ TOOLS = [
     get_menu,
     get_item_details,
     check_hours,
-    get_popular_items,
     get_order_status,
     add_to_cart,
     update_cart_quantity,

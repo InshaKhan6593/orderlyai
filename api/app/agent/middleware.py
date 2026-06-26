@@ -23,7 +23,7 @@ from langchain.agents.middleware import (  # type: ignore[import-not-found]
 
 from app.agent import catalog
 from app.agent.context import ctx_dict
-from app.agent.prompts import BusinessBrief, build_system_prompt
+from app.agent.prompts import BusinessBrief, render_system_prompt
 from app.agent.tools import CART_ONLY_TOOLS
 from app.core.db import SessionLocal
 
@@ -45,6 +45,7 @@ def _brief(business: Any) -> BusinessBrief:
         upsell_enabled=cfg.upsell_enabled if cfg else True,
         greeting=(cfg.greeting_message if cfg else None)
         or f"Hi! Welcome to {business.name}. How can I help?",
+        categories_summary=", ".join(catalog.category_names(business)),
         extra_instructions=cfg.extra_instructions if cfg else None,
         handoff_phone=cfg.human_handoff_phone if cfg else None,
     )
@@ -78,7 +79,7 @@ class TenantMiddleware(AgentMiddleware):
             async with SessionLocal() as s:
                 business = await catalog.load_business_for_agent(s, uuid.UUID(business_id))
             if business is not None:
-                prompt = build_system_prompt(_brief(business))
+                prompt = render_system_prompt(_brief(business))
 
         cart = request.state.get("cart") or []
         tools = (

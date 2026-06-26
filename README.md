@@ -4,7 +4,7 @@ AI-powered WhatsApp ordering + CMS platform for small food businesses
 (restaurants, cafés, bakeries, home kitchens). Multi-tenant SaaS.
 
 > **Status:** Backend (CMS API) built and tested. Frontend (Next.js) is **in progress** in
-> `web/` with shadcn/ui, auth, and onboarding steps 1–6 including the backend-wired menu builder and AI assistant config. The LangGraph
+> `web/` with shadcn/ui, auth, onboarding steps 1–8, WhatsApp setup, review/go-live, and owner dashboard routes including overview, orders, menu, customers, and settings. The LangGraph
 > WhatsApp agent and billing follow. Design docs live in `../inshakh/whatsapp-ordering-saas/`.
 
 ## Stack (current)
@@ -61,10 +61,12 @@ cp .env.example .env.local     # points at http://localhost:8000/api/v1 by defau
 pnpm dev                       # http://localhost:3000
 ```
 
-Currently built: the brand design system, sign-in/sign-up flows, and onboarding through
-the backend-wired AI assistant setup. Business profile, fulfillment settings, menu data,
-and assistant config are wired to the API; hours remains client-side until the agent
-ordering phase. WhatsApp connection and dashboard screens are next.
+Currently built: the brand design system, sign-in/sign-up flows, onboarding through
+review/go-live, WhatsApp connection setup, and owner dashboard routes for overview,
+orders, menu, customers, and settings. Business profile, fulfillment settings, menu
+data, assistant config, WhatsApp connection, order board/status updates, and settings
+profile saves are wired to the API; hours remains client-side until the agent ordering
+phase.
 
 > **shadcn MCP:** `.mcp.json` registers the shadcn MCP server so an AI agent can browse and
 > add components. After it's approved, run `pnpm dlx shadcn@latest add <component>` from `web/`.

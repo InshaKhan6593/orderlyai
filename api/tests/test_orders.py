@@ -66,6 +66,38 @@ def test_order_number_increments_per_business(client, business):
     assert o2["order_no"] == o1["order_no"] + 1
 
 
+def test_order_response_includes_customer_and_zone_for_dashboard(client, business):
+    owner, biz = business
+    prod, _ = _seed_burger(client, owner, biz)
+    zone = client.post(
+        f"/api/v1/businesses/{biz}/delivery-zones",
+        json={"name": "Gulshan", "fee": "150", "min_order": "0"},
+        headers=owner,
+    ).json()
+
+    created = client.post(
+        f"/api/v1/businesses/{biz}/orders",
+        json={
+            "customer_phone": "+923001234567",
+            "customer_name": "Ayesha Khan",
+            "fulfillment": "delivery",
+            "address": "House 18, Block 7, Gulshan, Karachi",
+            "zone_id": zone["id"],
+            "items": [{"product_id": prod["id"], "quantity": 1}],
+        },
+        headers=owner,
+    )
+    assert created.status_code == 201, created.text
+
+    order = client.get(
+        f"/api/v1/businesses/{biz}/orders/{created.json()['id']}", headers=owner
+    ).json()
+    assert order["customer"]["name"] == "Ayesha Khan"
+    assert order["customer"]["wa_phone"] == "+923001234567"
+    assert order["zone"]["name"] == "Gulshan"
+    assert order["zone"]["fee"] == "150.00"
+
+
 def test_invalid_status_transition_rejected(client, business):
     owner, biz = business
     prod, _ = _seed_burger(client, owner, biz)

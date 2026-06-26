@@ -321,7 +321,7 @@ def _post_signed(client, payload: dict) -> object:
     )
 
 
-def _inbound_text_payload(phone_number_id: str, sender: str) -> dict:
+def _inbound_text_payload(phone_number_id: str, sender: str, msg_id: str = "wamid.TEST") -> dict:
     return {
         "object": "whatsapp_business_account",
         "entry": [
@@ -342,7 +342,7 @@ def _inbound_text_payload(phone_number_id: str, sender: str) -> dict:
                             "messages": [
                                 {
                                     "from": sender,
-                                    "id": "wamid.TEST",
+                                    "id": msg_id,
                                     "timestamp": "1700000000",
                                     "type": "text",
                                     "text": {"body": "Hi"},
@@ -356,35 +356,85 @@ def _inbound_text_payload(phone_number_id: str, sender: str) -> dict:
     }
 
 
-def test_inbound_message_triggers_placeholder_reply(client, business, monkeypatch):
+def _stub_agent_pipeline(monkeypatch, *, run_turn, send_payloads):
+    """Point the durable-inbox flow at the test DB and stub the agent + Graph API calls.
+
+    Persist runs on the webhook's session; the background drain opens its own — patch both.
+    """
+    from conftest import _TestSession
     from app.api import whatsapp as whatsapp_api
-    from app.services import whatsapp_service
+    from app.services import whatsapp_service, whatsapp_worker
+
+    monkeypatch.setattr(settings, "whatsapp_app_secret", "app-secret-xyz")
+    monkeypatch.setattr(whatsapp_api, "SessionLocal", _TestSession)      # persist (in-request)
+    monkeypatch.setattr(whatsapp_worker, "SessionLocal", _TestSession)   # drain (background)
+    monkeypatch.setattr("app.agent.runtime.get_whatsapp_agent", lambda: object())
+    monkeypatch.setattr("app.agent.runtime.run_turn", run_turn)
+    monkeypatch.setattr(whatsapp_service, "send_payloads", send_payloads)
+
+    async def _noop_mark_read(**kwargs):  # avoid a real Graph API call for read receipts
+        return True
+
+    monkeypatch.setattr(whatsapp_service, "mark_read", _noop_mark_read)
+
+
+def test_inbound_message_runs_agent_and_sends_reply(client, business, monkeypatch):
+    from app.agent.schemas import AgentReply, TextMessage
 
     headers, business_id = business
     pnid = str(uuid.uuid4().int)[:15]  # unique per test → unambiguous routing
     _save_connection(client, headers, business_id, pnid)
 
-    calls: list[dict] = []
+    sent: list[dict] = []
 
-    async def fake_send_text(*, phone_number_id, access_token, to, body):
-        calls.append(
-            {"phone_number_id": phone_number_id, "access_token": access_token,
-             "to": to, "body": body}
+    async def fake_run_turn(agent, *, business_id, customer_phone, thread_id, text, confirmed=False):
+        return AgentReply(messages=[TextMessage(kind="text", body=f"You said: {text}")])
+
+    async def fake_send_payloads(*, phone_number_id, access_token, payloads):
+        sent.append(
+            {"phone_number_id": phone_number_id, "access_token": access_token, "payloads": payloads}
         )
         return True
 
-    monkeypatch.setattr(settings, "whatsapp_app_secret", "app-secret-xyz")
-    monkeypatch.setattr(whatsapp_service, "send_text", fake_send_text)
+    _stub_agent_pipeline(monkeypatch, run_turn=fake_run_turn, send_payloads=fake_send_payloads)
 
     r = _post_signed(client, _inbound_text_payload(pnid, "16505551234"))
 
     assert r.status_code == 200, r.text
-    assert len(calls) == 1
-    assert calls[0]["to"] == "16505551234"
-    assert calls[0]["phone_number_id"] == pnid
-    # token was decrypted on the way out
-    assert calls[0]["access_token"] == "EAAG-inbound-token"
-    assert calls[0]["body"] == whatsapp_api._PLACEHOLDER_REPLY
+    assert len(sent) == 1
+    assert sent[0]["phone_number_id"] == pnid
+    assert sent[0]["access_token"] == "EAAG-inbound-token"  # decrypted on the way out
+    payloads = sent[0]["payloads"]
+    assert payloads[0]["to"] == "16505551234"
+    assert payloads[0]["text"]["body"] == "You said: Hi"
+
+
+def test_duplicate_message_id_is_deduped(client, business, monkeypatch):
+    # Meta re-delivers the same message_id (its at-least-once retry). The agent must reply
+    # only ONCE, not twice — now enforced durably by the inbox's unique message_id.
+    from app.agent.schemas import AgentReply, TextMessage
+
+    headers, business_id = business
+    pnid = str(uuid.uuid4().int)[:15]
+    _save_connection(client, headers, business_id, pnid)
+
+    sent: list = []
+
+    async def fake_run_turn(agent, *, business_id, customer_phone, thread_id, text, confirmed=False):
+        return AgentReply(messages=[TextMessage(kind="text", body="hi back")])
+
+    async def fake_send_payloads(*, phone_number_id, access_token, payloads):
+        sent.append(payloads)
+        return True
+
+    _stub_agent_pipeline(monkeypatch, run_turn=fake_run_turn, send_payloads=fake_send_payloads)
+
+    payload = _inbound_text_payload(pnid, "16505551234", msg_id="wamid.DUP")
+    r1 = _post_signed(client, payload)
+    r2 = _post_signed(client, payload)  # identical message_id == Meta retry
+
+    assert r1.status_code == 200 and r2.status_code == 200
+    assert len(sent) == 1  # replied once despite two deliveries
 
 
 def test_status_notification_does_not_reply(client, business, monkeypatch):
@@ -396,12 +446,12 @@ def test_status_notification_does_not_reply(client, business, monkeypatch):
 
     calls: list[dict] = []
 
-    async def fake_send_text(**kwargs):
+    async def fake_send_payloads(**kwargs):
         calls.append(kwargs)
         return True
 
     monkeypatch.setattr(settings, "whatsapp_app_secret", "app-secret-xyz")
-    monkeypatch.setattr(whatsapp_service, "send_text", fake_send_text)
+    monkeypatch.setattr(whatsapp_service, "send_payloads", fake_send_payloads)
 
     payload = {
         "object": "whatsapp_business_account",
@@ -430,3 +480,61 @@ def test_status_notification_does_not_reply(client, business, monkeypatch):
 
     assert r.status_code == 200, r.text
     assert calls == []
+
+
+def _inbound_interactive_payload(pnid: str, sender: str, itype: str, rid: str, title: str) -> dict:
+    return {
+        "object": "whatsapp_business_account",
+        "entry": [
+            {
+                "changes": [
+                    {
+                        "field": "messages",
+                        "value": {
+                            "metadata": {"phone_number_id": pnid},
+                            "messages": [
+                                {
+                                    "from": sender,
+                                    "id": "wamid.X",
+                                    "type": "interactive",
+                                    "interactive": {"type": itype, itype: {"id": rid, "title": title}},
+                                }
+                            ],
+                        },
+                    }
+                ]
+            }
+        ],
+    }
+
+
+def test_parse_button_and_list_taps():
+    from app.services.whatsapp_service import parse_incoming_message
+
+    btn = parse_incoming_message(
+        _inbound_interactive_payload("p1", "u1", "button_reply", "confirm_order", "Confirm")
+    )
+    assert btn["type"] == "interactive"
+    assert btn["reply_id"] == "confirm_order"
+    assert btn["text"] == "Confirm"
+
+    lst = parse_incoming_message(
+        _inbound_interactive_payload("p1", "u1", "list_reply", "product:abc", "Smokey Burger")
+    )
+    assert lst["reply_id"] == "product:abc"
+    assert lst["text"] == "Smokey Burger"
+
+
+def test_agent_input_mapping():
+    from app.api.whatsapp import _agent_input
+
+    # The confirm button is the only thing that flips `confirmed` true.
+    assert _agent_input({"reply_id": "confirm_order", "text": "Confirm"}) == ("Confirm the order.", True)
+    assert _agent_input({"reply_id": "cancel_order", "text": "Cancel"})[1] is False
+    assert _agent_input({"reply_id": "edit_cart", "text": "Edit"})[1] is False
+    # A list-row product tap forwards the item name as the customer's choice.
+    text, confirmed = _agent_input({"reply_id": "product:abc", "text": "Smokey Burger"})
+    assert text == "Smokey Burger" and confirmed is False
+    # Plain text passes through; empty/no message is ignored.
+    assert _agent_input({"reply_id": "", "text": "hi"}) == ("hi", False)
+    assert _agent_input({"reply_id": "", "text": ""}) == (None, False)

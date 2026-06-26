@@ -94,7 +94,12 @@ async def load_order(
     stmt = (
         select(Order)
         .where(Order.id == order_id, Order.business_id == business_id)
-        .options(selectinload(Order.items), selectinload(Order.status_history))
+        .options(
+            selectinload(Order.customer),
+            selectinload(Order.zone),
+            selectinload(Order.items),
+            selectinload(Order.status_history),
+        )
         # `expire_on_commit=False` keeps committed objects in the identity map;
         # repopulate so a re-read after a write returns fresh rows/collections.
         .execution_options(populate_existing=True)

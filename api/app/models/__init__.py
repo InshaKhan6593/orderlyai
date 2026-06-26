@@ -14,7 +14,7 @@ from app.models.menu import (
 from app.models.ops import BusinessHours, DeliveryZone
 from app.models.order import Order, OrderItem, OrderStatusHistory
 from app.models.user import User
-from app.models.whatsapp import WhatsAppConnection
+from app.models.whatsapp import WhatsAppConnection, WhatsAppInbox
 
 __all__ = [
     "Base",
@@ -35,4 +35,5 @@ __all__ = [
     "OrderItem",
     "OrderStatusHistory",
     "WhatsAppConnection",
+    "WhatsAppInbox",
 ]

@@ -26,7 +26,7 @@ from langchain.agents.middleware import (  # type: ignore[import-not-found]
 
 from app.agent import snapshot
 from app.agent.context import ctx_dict
-from app.agent.prompts import render_system_prompt
+from app.agent.prompts import customer_block, render_system_prompt
 from app.agent.tools import CART_ONLY_TOOLS
 
 _FALLBACK_PROMPT = (
@@ -67,7 +67,9 @@ class TenantMiddleware(AgentMiddleware):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelResponse:
-        business_id = ctx_dict(request.runtime).get("business_id")
+        context = ctx_dict(request.runtime)
+        business_id = context.get("business_id")
+        customer_phone = context.get("customer_phone")
         prompt = _FALLBACK_PROMPT
         menu_preloaded = False
         if business_id:
@@ -75,6 +77,21 @@ class TenantMiddleware(AgentMiddleware):
             if snap is not None:
                 prompt = render_system_prompt(snap.brief)
                 menu_preloaded = snap.menu_preloaded
+                # Append the returning-customer profile (name + saved address) so the agent
+                # personalises and doesn't re-ask details we already have. Loaded server-side
+                # and scoped by phone, so it can't reach another tenant's customer.
+                if customer_phone:
+                    cust = await snapshot.get_customer_brief(
+                        uuid.UUID(business_id), customer_phone
+                    )
+                    if cust is not None:
+                        block = customer_block(
+                            name=cust.name,
+                            default_address=cust.default_address,
+                            order_count=cust.order_count,
+                        )
+                        if block:
+                            prompt = f"{prompt}\n\n{block}"
 
         tools = select_tools(
             self._tools,

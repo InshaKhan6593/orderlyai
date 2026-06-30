@@ -1,12 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ComponentType, type SVGProps } from "react";
 import { useRouter } from "next/navigation";
 import {
   Clock,
   CreditCard,
   MapPin,
-  MessageCircle,
   Sparkles,
   Store,
   Truck,
@@ -14,6 +13,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { WhatsAppIcon } from "@/components/brand/whatsapp-icon";
 import { DashboardShell } from "@/components/dashboard/dashboard-shell";
 import { AIAssistantForm } from "@/components/onboarding/ai-assistant-form";
 import { BusinessHoursForm } from "@/components/onboarding/business-hours-form";
@@ -47,7 +47,7 @@ type TabId =
 type SettingsTab = {
   id: TabId;
   label: string;
-  icon: typeof Store;
+  icon: ComponentType<SVGProps<SVGSVGElement>>;
   title: string;
   subtitle: string;
 };
@@ -91,7 +91,7 @@ const SETTINGS_TABS: SettingsTab[] = [
   {
     id: "whatsapp",
     label: "WhatsApp",
-    icon: MessageCircle,
+    icon: WhatsAppIcon,
     title: "WhatsApp connection",
     subtitle: "Connect your Meta WhatsApp number so customers can order.",
   },

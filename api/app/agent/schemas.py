@@ -70,7 +70,7 @@ class TextMessage(BaseModel):
 
 class ListRow(BaseModel):
     # Self-describing ids let the worker interpret a tap deterministically:
-    # "product:<uuid>", "reorder:<order_no>", "confirm_order", "edit_cart", "cancel_order".
+    # "product:<uuid>", "reorder:<order_code>", "confirm_order", "edit_cart", "cancel_order".
     id: str = Field(max_length=200)
     title: str = Field(max_length=24)
     description: str | None = Field(default=None, max_length=72)
@@ -195,7 +195,17 @@ class AgentReply(BaseModel):
 BTN_CONFIRM = "confirm_order"
 BTN_EDIT = "edit_cart"
 BTN_CANCEL = "cancel_order"
+# Deterministic delivery/pickup choice buttons (asked in code when the business offers both).
+BTN_FUL_DELIVERY = "ful_delivery"
+BTN_FUL_PICKUP = "ful_pickup"
+# Deterministic "update your saved detail?" buttons (the model only proposes the new value via
+# update_detail; applying + persisting it is gated on the customer tapping Update here).
+BTN_UPDATE_CONFIRM = "update_detail_confirm"
+BTN_UPDATE_KEEP = "update_detail_keep"
 ROW_PRODUCT_PREFIX = "product:"
-# Reorder button/row id: "reorder:" + the past order number (e.g. "reorder:2"). A tap rebuilds
+# Delivery-area pick list: each zone row id is "zone:" + the delivery_zone uuid. A tap selects
+# that area exactly (no address-text guessing) and confirms serviceability deterministically.
+ROW_ZONE_PREFIX = "zone:"
+# Reorder button/row id: "reorder:" + the past order code (e.g. "reorder:K7Q2X9"). A tap rebuilds
 # the cart from that order via the reorder tool — the customer's own past order, re-priced today.
 ROW_REORDER_PREFIX = "reorder:"

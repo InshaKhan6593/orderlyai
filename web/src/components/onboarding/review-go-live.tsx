@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ComponentType, type SVGProps } from "react";
 import { useRouter } from "next/navigation";
 import {
   ArrowLeft,
@@ -8,14 +8,13 @@ import {
   Bot,
   Check,
   Clock,
-  type LucideIcon,
-  MessageCircle,
   Store,
   Truck,
   UtensilsCrossed,
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { WhatsAppIcon } from "@/components/brand/whatsapp-icon";
 import { OnboardingShell } from "@/components/onboarding/onboarding-shell";
 import {
   ONBOARDING_MAIN_CLASS_NAME,
@@ -70,7 +69,7 @@ type ChecklistDetails = {
 
 type ChecklistRow = {
   key: string;
-  icon: LucideIcon;
+  icon: ComponentType<SVGProps<SVGSVGElement>>;
   title: string;
   summary: string;
   statusText: string;
@@ -188,7 +187,7 @@ function buildRows(business: Business, details: ChecklistDetails): ChecklistRow[
     },
     {
       key: "whatsapp",
-      icon: MessageCircle,
+      icon: WhatsAppIcon,
       title: "WhatsApp",
       summary: wa.text,
       statusText: wa.statusText,

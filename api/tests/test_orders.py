@@ -98,6 +98,51 @@ def test_order_response_includes_customer_and_zone_for_dashboard(client, busines
     assert order["zone"]["fee"] == "150.00"
 
 
+def test_delivery_order_saves_area_and_address_as_customer_preference(client, business):
+    # A delivery order persists the chosen area (zone) + street address onto the customer record,
+    # so the agent can prefill them on the next order instead of re-asking.
+    import asyncio
+    import uuid as _uuid
+
+    from sqlalchemy import select
+    from conftest import _TestSession
+    from app.models.customer import Customer
+
+    owner, biz = business
+    prod, _ = _seed_burger(client, owner, biz)
+    zone = client.post(
+        f"/api/v1/businesses/{biz}/delivery-zones",
+        json={"name": "Defence", "fee": "120", "min_order": "0"},
+        headers=owner,
+    ).json()
+    created = client.post(
+        f"/api/v1/businesses/{biz}/orders",
+        json={
+            "customer_phone": "+923004445566",
+            "customer_name": "Sara",
+            "fulfillment": "delivery",
+            "address": "House 5, Street 10, Defence",
+            "zone_id": zone["id"],
+            "items": [{"product_id": prod["id"], "quantity": 1}],
+        },
+        headers=owner,
+    )
+    assert created.status_code == 201, created.text
+
+    async def _load():
+        async with _TestSession() as s:
+            return await s.scalar(
+                select(Customer).where(
+                    Customer.business_id == _uuid.UUID(biz),
+                    Customer.wa_phone == "+923004445566",
+                )
+            )
+
+    cust = asyncio.run(_load())
+    assert str(cust.default_zone_id) == zone["id"]
+    assert cust.default_address == "House 5, Street 10, Defence"
+
+
 def test_invalid_status_transition_rejected(client, business):
     owner, biz = business
     prod, _ = _seed_burger(client, owner, biz)

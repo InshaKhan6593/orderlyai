@@ -54,10 +54,11 @@ async function postAuth(
   path: string,
   body: Record<string, unknown>,
   fallback: (status: number) => string,
+  fetcher: typeof fetch = fetch,
 ): Promise<Tokens> {
   let res: Response;
   try {
-    res = await fetch(apiUrl(path), {
+    res = await fetcher(apiUrl(path), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -125,6 +126,60 @@ export function readAccessToken(): string | null {
     window.localStorage.getItem(ACCESS_KEY) ??
     window.sessionStorage.getItem(ACCESS_KEY)
   );
+}
+
+/** Read the stored refresh token (localStorage preferred, then sessionStorage). */
+export function readRefreshToken(): string | null {
+  if (typeof window === "undefined") return null;
+  return (
+    window.localStorage.getItem(REFRESH_KEY) ??
+    window.sessionStorage.getItem(REFRESH_KEY)
+  );
+}
+
+/** Where the tokens currently live — preserves the "Remember me" choice on refresh. */
+function tokensInLocalStorage(): boolean {
+  if (typeof window === "undefined") return true;
+  return window.localStorage.getItem(ACCESS_KEY) !== null;
+}
+
+/** POST /auth/refresh — exchange a refresh token for a fresh token pair, or throw ApiError. */
+export function refreshTokens(
+  refreshToken: string,
+  fetcher: typeof fetch = fetch,
+): Promise<Tokens> {
+  return postAuth(
+    "/auth/refresh",
+    { refresh_token: refreshToken },
+    (status) =>
+      status === 401
+        ? "Your session has expired. Please sign in again."
+        : "Couldn't refresh your session. Please sign in again.",
+    fetcher,
+  );
+}
+
+/**
+ * Refresh the access token using the stored refresh token, persisting the new pair.
+ *
+ * Returns the new access token, or `null` when there's no refresh token or the refresh failed —
+ * in which case stored tokens are cleared so the app falls back to the login flow. This is what
+ * lets long-open dashboard sessions recover from an expired 30-minute access token instead of
+ * surfacing a 401 on the next mutation.
+ */
+export async function refreshAccessToken(
+  fetcher: typeof fetch = fetch,
+): Promise<string | null> {
+  const refreshToken = readRefreshToken();
+  if (!refreshToken) return null;
+  try {
+    const tokens = await refreshTokens(refreshToken, fetcher);
+    storeTokens(tokens, tokensInLocalStorage());
+    return tokens.access_token;
+  } catch {
+    clearTokens();
+    return null;
+  }
 }
 
 /** GET /auth/me — the authenticated user, or throws ApiError. */

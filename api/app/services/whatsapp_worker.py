@@ -114,10 +114,10 @@ def agent_input(parsed: dict[str, Any]) -> tuple[str | None, bool]:
     if reply_id == BTN_EDIT:
         return "I'd like to edit my cart.", False
     if reply_id.startswith(ROW_REORDER_PREFIX):
-        # "reorder:<order_no>" — the model then calls the reorder tool to rebuild the cart.
-        order_no = reply_id[len(ROW_REORDER_PREFIX) :].strip()
-        if order_no.isdigit():
-            return f"Please reorder my order #{order_no}.", False
+        # "reorder:<order_code>" — the model then calls the reorder tool to rebuild the cart.
+        code = reply_id[len(ROW_REORDER_PREFIX) :].strip()
+        if code:
+            return f"Please reorder my order {code}.", False
         return "Please reorder my last order.", False
     if reply_id.startswith(ROW_PRODUCT_PREFIX):
         return parsed.get("text") or "Tell me about that item.", False
@@ -377,7 +377,10 @@ async def _process_unit(
     error_code = getattr(result, "error_code", None)
     if not getattr(result, "retryable", True):
         await _mark(db, [owner], "failed", error=f"send failed (code={error_code})")
-        if error_code == whatsapp_service.ERROR_TOKEN_EXPIRED:
+        if error_code in (
+            whatsapp_service.ERROR_TOKEN_EXPIRED,
+            whatsapp_service.ERROR_INVALID_CREDENTIALS,
+        ):
             connection.status = "error"
             await db.commit()
         return False

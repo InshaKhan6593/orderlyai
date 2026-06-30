@@ -28,15 +28,16 @@ from app.services import whatsapp_service
 logger = logging.getLogger(__name__)
 
 # Customer-facing copy per status. `pending` is the initial state (no notification); the keys
-# here mirror order_service.TRANSITIONS targets.
+# here mirror order_service.TRANSITIONS targets. `{code}` is the short order code shown to the
+# customer (never the internal order_no sequence).
 _STATUS_MESSAGES: dict[str, str] = {
-    "accepted": "Good news! Your order #{no} has been accepted and will be prepared shortly.",
-    "preparing": "Your order #{no} is now being prepared.",
-    "ready": "Your order #{no} is ready for pickup!",
-    "out_for_delivery": "Your order #{no} is out for delivery.",
-    "completed": "Your order #{no} is complete. Thank you for ordering!",
-    "rejected": "Sorry, we couldn't accept your order #{no}. Please message us for help.",
-    "cancelled": "Your order #{no} has been cancelled.",
+    "accepted": "Good news! Your order {code} has been accepted and will be prepared shortly.",
+    "preparing": "Your order {code} is now being prepared.",
+    "ready": "Your order {code} is ready for pickup!",
+    "out_for_delivery": "Your order {code} is out for delivery.",
+    "completed": "Your order {code} is complete. Thank you for ordering!",
+    "rejected": "Sorry, we couldn't accept your order {code}. Please message us for help.",
+    "cancelled": "Your order {code} has been cancelled.",
 }
 
 
@@ -113,14 +114,14 @@ async def notify_order_status(business_id, order_id) -> bool:
             if connection is None or not connection.access_token:
                 return False
 
-            body = body_tmpl.format(no=order.order_no)
+            body = body_tmpl.format(code=order.order_code)
             in_window = _window_open(customer.last_inbound_at)
             components = (
                 [
                     {
                         "type": "body",
                         "parameters": [
-                            {"type": "text", "text": str(order.order_no)},
+                            {"type": "text", "text": order.order_code},
                             {"type": "text", "text": order.status.replace("_", " ")},
                         ],
                     }
@@ -128,7 +129,7 @@ async def notify_order_status(business_id, order_id) -> bool:
                 if settings.whatsapp_order_status_template
                 else None
             )
-            return await _deliver(
+            sent = await _deliver(
                 connection=connection,
                 to=customer.wa_phone,
                 in_window=in_window,
@@ -136,6 +137,32 @@ async def notify_order_status(business_id, order_id) -> bool:
                 template_name=settings.whatsapp_order_status_template,
                 template_components=components,
             )
+        # Outside the DB session: if the customer was actually messaged, record it in the agent's
+        # conversation memory so a reply (“how long?”) has context — the agent otherwise never sees
+        # these out-of-band status pings (see record_status_in_agent_memory).
+        if sent:
+            await record_status_in_agent_memory(business_id, customer.wa_phone, body)
+        return sent
     except Exception:  # noqa: BLE001 — notifications never break the calling request
         logger.exception("Order status notification failed for order %s", order_id)
         return False
+
+
+async def record_status_in_agent_memory(business_id, wa_phone: str, text: str) -> None:
+    """Append a sent status notification to the customer's agent thread (best-effort).
+
+    Status pings are sent out-of-band (not through the agent), so the agent never sees them.
+    We write the delivered text into the LangGraph checkpoint as an assistant message — the same
+    thread the agent reads — so the next inbound turn has it in context and a follow-up like
+    "how long?" lands coherently. Never raises: a memory hiccup must not fail the notification.
+    """
+    try:
+        from langchain.messages import AIMessage  # local imports: keep the API import light
+
+        from app.agent.runtime import get_whatsapp_agent, thread_id_for
+
+        agent = get_whatsapp_agent()
+        config = {"configurable": {"thread_id": thread_id_for(business_id, wa_phone)}}
+        await agent.aupdate_state(config, {"messages": [AIMessage(content=text)]})
+    except Exception:  # noqa: BLE001 — context enrichment is best-effort
+        logger.debug("Could not record status notification in agent memory", exc_info=True)

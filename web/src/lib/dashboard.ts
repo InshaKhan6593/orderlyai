@@ -1,5 +1,5 @@
 import { apiUrl } from "@/lib/api";
-import { ApiError } from "@/lib/auth";
+import { ApiError, readAccessToken, refreshAccessToken } from "@/lib/auth";
 import type { Business } from "@/lib/business-profile";
 
 type Fetcher = typeof fetch;
@@ -50,6 +50,7 @@ export type DashboardOrder = {
   business_id: string;
   customer_id: string;
   order_no: number;
+  order_code: string;
   channel: string;
   status: DashboardOrderStatus;
   fulfillment: "delivery" | "pickup";
@@ -209,21 +210,42 @@ async function dashboardRequest<T>({
   body?: unknown;
   fetcher?: Fetcher;
 }): Promise<T> {
-  let response: Response;
-  try {
-    response = await fetcher(apiUrl(path), {
+  const send = (token: string): Promise<Response> =>
+    fetcher(apiUrl(path), {
       method,
       headers: {
-        Authorization: `Bearer ${accessToken}`,
+        Authorization: `Bearer ${token}`,
         ...(body === undefined ? {} : { "Content-Type": "application/json" }),
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
+
+  let response: Response;
+  try {
+    // Prefer the freshest stored token — a sibling request may have just refreshed it.
+    response = await send(readAccessToken() ?? accessToken);
   } catch {
     throw new ApiError(
       "Couldn't reach the server. Is the API running on http://localhost:8000?",
       0,
     );
+  }
+
+  // The access token is a short-lived (30-minute) JWT. On expiry, refresh once with the stored
+  // refresh token and retry — otherwise every mutation after 30 minutes (e.g. the Accepting-orders
+  // toggle) fails with an unrecoverable 401 until the user logs in again.
+  if (response.status === 401) {
+    const refreshedToken = await refreshAccessToken(fetcher);
+    if (refreshedToken) {
+      try {
+        response = await send(refreshedToken);
+      } catch {
+        throw new ApiError(
+          "Couldn't reach the server. Is the API running on http://localhost:8000?",
+          0,
+        );
+      }
+    }
   }
 
   if (!response.ok) {
@@ -255,6 +277,41 @@ export function listDashboardOrders({
 }): Promise<DashboardOrder[]> {
   return dashboardRequest<DashboardOrder[]>({
     path: `/businesses/${businessId}/orders?limit=100`,
+    accessToken,
+    fetcher,
+  });
+}
+
+// Full customer record from GET /businesses/{id}/customers (mirrors the backend CustomerOut), so
+// the dashboard shows real customer data instead of a partial view derived from recent orders.
+export type DashboardCustomer = {
+  id: string;
+  wa_phone: string;
+  name: string | null;
+  email: string | null;
+  alternate_phone: string | null;
+  default_address: string | null;
+  order_count: number;
+  last_order_at: string | null;
+  marketing_opt_in: boolean;
+  created_at: string;
+};
+
+export function listDashboardCustomers({
+  accessToken,
+  businessId,
+  limit = 200,
+  offset = 0,
+  fetcher = fetch,
+}: {
+  accessToken: string;
+  businessId: string;
+  limit?: number;
+  offset?: number;
+  fetcher?: Fetcher;
+}): Promise<DashboardCustomer[]> {
+  return dashboardRequest<DashboardCustomer[]>({
+    path: `/businesses/${businessId}/customers?limit=${limit}&offset=${offset}`,
     accessToken,
     fetcher,
   });

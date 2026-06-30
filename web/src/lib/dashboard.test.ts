@@ -1,8 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   buildDashboardOverview,
   groupOrdersForBoard,
+  listDashboardCustomers,
   listDashboardOrders,
   nextPrimaryOrderAction,
   toggleAcceptingOrders,
@@ -13,11 +14,37 @@ import {
   type DashboardOrder,
 } from "./dashboard";
 
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+function fakeStorage(initial: Record<string, string> = {}): Storage {
+  const map = new Map<string, string>(Object.entries(initial));
+  return {
+    get length() {
+      return map.size;
+    },
+    clear: () => map.clear(),
+    getItem: (key: string) => map.get(key) ?? null,
+    key: (index: number) => Array.from(map.keys())[index] ?? null,
+    removeItem: (key: string) => void map.delete(key),
+    setItem: (key: string, value: string) => void map.set(key, value),
+  } as Storage;
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
 const baseOrder: DashboardOrder = {
   id: "order-1",
   business_id: "biz-1",
   customer_id: "customer-1",
   order_no: 1024,
+  order_code: "K7Q2X9",
   channel: "whatsapp",
   status: "pending",
   fulfillment: "delivery",
@@ -246,6 +273,106 @@ describe("dashboard API helpers", () => {
         body: JSON.stringify({ accepting_orders: false }),
       }),
     );
+  });
+
+  it("lists customers from the customers endpoint with pagination params", async () => {
+    const fetcher = vi.fn().mockResolvedValue(
+      jsonResponse([
+        {
+          id: "c-1",
+          wa_phone: "+923001234567",
+          name: "Ayesha Khan",
+          email: null,
+          alternate_phone: null,
+          default_address: null,
+          order_count: 3,
+          last_order_at: "2026-06-20T10:42:00Z",
+          marketing_opt_in: false,
+          created_at: "2026-06-01T00:00:00Z",
+        },
+      ]),
+    );
+
+    const customers = await listDashboardCustomers({
+      accessToken: "token",
+      businessId: "biz-1",
+      fetcher,
+    });
+
+    expect(customers).toHaveLength(1);
+    expect(customers[0].order_count).toBe(3);
+    expect(fetcher).toHaveBeenCalledWith(
+      "http://localhost:8000/api/v1/businesses/biz-1/customers?limit=200&offset=0",
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer token" }),
+      }),
+    );
+  });
+
+  it("refreshes the access token and retries once after a 401", async () => {
+    const local = fakeStorage({
+      "orderly.access_token": "expired",
+      "orderly.refresh_token": "refresh-1",
+    });
+    const session = fakeStorage();
+    vi.stubGlobal("window", { localStorage: local, sessionStorage: session });
+    vi.stubGlobal("localStorage", local);
+    vi.stubGlobal("sessionStorage", session);
+
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({ error: { code: "unauthorized", message: "Invalid or expired token" } }, 401),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({ access_token: "fresh", refresh_token: "refresh-2", token_type: "bearer" }),
+      )
+      .mockResolvedValueOnce(jsonResponse({ id: "biz-1", accepting_orders: false }));
+
+    const result = await toggleAcceptingOrders({
+      accessToken: "expired",
+      businessId: "biz-1",
+      acceptingOrders: false,
+      fetcher,
+    });
+
+    expect(result).toMatchObject({ id: "biz-1", accepting_orders: false });
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    // the stored refresh token is exchanged at /auth/refresh...
+    expect(fetcher).toHaveBeenNthCalledWith(
+      2,
+      "http://localhost:8000/api/v1/auth/refresh",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ refresh_token: "refresh-1" }),
+      }),
+    );
+    // ...the retry carries the fresh token, and the new pair is persisted
+    expect(fetcher).toHaveBeenNthCalledWith(
+      3,
+      "http://localhost:8000/api/v1/businesses/biz-1",
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer fresh" }),
+      }),
+    );
+    expect(local.getItem("orderly.access_token")).toBe("fresh");
+    expect(local.getItem("orderly.refresh_token")).toBe("refresh-2");
+  });
+
+  it("surfaces the 401 without retrying when no refresh token is stored", async () => {
+    const fetcher = vi.fn().mockResolvedValue(
+      jsonResponse({ error: { code: "unauthorized", message: "Invalid or expired token" } }, 401),
+    );
+
+    await expect(
+      toggleAcceptingOrders({
+        accessToken: "expired",
+        businessId: "biz-1",
+        acceptingOrders: false,
+        fetcher,
+      }),
+    ).rejects.toMatchObject({ status: 401, message: "Invalid or expired token" });
+    expect(fetcher).toHaveBeenCalledTimes(1); // no window / refresh token → no refresh attempt
   });
 
   it("patches dashboard business profile fields through the existing business endpoint", async () => {

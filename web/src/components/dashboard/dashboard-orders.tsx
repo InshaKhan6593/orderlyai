@@ -7,14 +7,15 @@ import {
   CalendarDays,
   Grid2X2,
   List,
-  MessageCircle,
   Search,
   Volume2,
   X,
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { WhatsAppIcon } from "@/components/brand/whatsapp-icon";
 import { DashboardShell } from "@/components/dashboard/dashboard-shell";
+import { OrderStatusBadge } from "@/components/dashboard/order-status-badge";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -73,24 +74,6 @@ function timeAgo(value: string): string {
   return `${hours} hr ago`;
 }
 
-function statusBadgeClass(status: DashboardOrderStatus): string {
-  switch (status) {
-    case "pending":
-      return "border-primary/25 bg-primary/10 text-primary";
-    case "accepted":
-      return "border-blue-300 bg-blue-50 text-blue-700";
-    case "preparing":
-      return "border-amber-300 bg-amber-50 text-amber-700";
-    case "ready":
-    case "out_for_delivery":
-      return "border-violet-300 bg-violet-50 text-violet-700";
-    case "completed":
-      return "border-primary/25 bg-primary/10 text-primary";
-    default:
-      return "border-border bg-muted text-muted-foreground";
-  }
-}
-
 function paymentBadge(order: DashboardOrder) {
   if (order.payment_status === "paid" || order.payment_method === "paid") {
     return { label: "Paid", className: "border-primary/25 bg-primary/10 text-primary" };
@@ -147,7 +130,7 @@ function OrderCard({
       <button type="button" className="block w-full text-left" onClick={onSelect}>
         <div className="flex items-start justify-between gap-2">
           <div>
-            <p className="font-semibold text-foreground">#{order.order_no}</p>
+            <p className="font-semibold text-foreground">{order.order_code}</p>
             <p className="mt-2 text-sm text-foreground">
               {order.customer.name ?? order.customer.wa_phone}
             </p>
@@ -166,7 +149,7 @@ function OrderCard({
             <Badge variant="outline" className={payment.className}>
               {payment.label}
             </Badge>
-            <MessageCircle className="size-4 text-muted-foreground" aria-hidden="true" />
+            <WhatsAppIcon className="size-4 text-muted-foreground" aria-hidden="true" />
           </div>
         </div>
       </button>
@@ -188,9 +171,7 @@ function OrderCard({
           ) : null}
         </div>
       ) : (
-        <Badge variant="outline" className={cn("mt-4", statusBadgeClass(order.status))}>
-          {statusLabel(order.status)}
-        </Badge>
+        <OrderStatusBadge status={order.status} className="mt-4" />
       )}
     </article>
   );
@@ -252,14 +233,12 @@ function OrderDetailSheet({
           <>
             <div className="flex min-h-[70px] items-center gap-3 border-b border-border px-5">
               <SheetTitle className="text-xl font-medium">
-                Order #{order.order_no}
+                Order {order.order_code}
               </SheetTitle>
               <SheetDescription className="sr-only">
                 Order details, customer, and fulfillment actions.
               </SheetDescription>
-              <Badge variant="outline" className={statusBadgeClass(order.status)}>
-                {statusLabel(order.status)}
-              </Badge>
+              <OrderStatusBadge status={order.status} />
               {fulfillment ? (
                 <Badge variant="outline" className={fulfillment.className}>
                   {fulfillment.label}
@@ -331,7 +310,7 @@ function OrderDetailSheet({
             </p>
             <p className="mt-1 text-sm text-muted-foreground">{order.customer.wa_phone}</p>
             <Button variant="outline" className="mt-3 h-8">
-              <MessageCircle data-icon="inline-start" />
+              <WhatsAppIcon data-icon="inline-start" />
               Message on WhatsApp
             </Button>
           </section>
@@ -465,6 +444,17 @@ export function DashboardOrdersPage() {
         setAccessToken(token);
         setBusiness(selected);
         setOrders(loadedOrders);
+        // Deep-link from the overview ("Recent orders" row) — ?order=<id> opens that order's detail.
+        // Set BOTH the open flag (selectedOrderId) and the sheet's data (detailOrder), the same as
+        // a board-card click — otherwise the drawer opens with no order loaded.
+        const requestedId = new URLSearchParams(window.location.search).get("order");
+        const requestedOrder = requestedId
+          ? loadedOrders.find((order) => order.id === requestedId)
+          : undefined;
+        if (requestedOrder) {
+          setSelectedOrderId(requestedOrder.id);
+          setDetailOrder(requestedOrder);
+        }
       } catch (error) {
         if (!active) return;
         if (error instanceof ApiError && error.status === 401) {
@@ -490,7 +480,7 @@ export function DashboardOrdersPage() {
       const matchesFulfillment = fulfillment === "all" || order.fulfillment === fulfillment;
       const matchesQuery =
         !query ||
-        String(order.order_no).includes(query) ||
+        order.order_code.toLowerCase().includes(query) ||
         (order.customer.name ?? "").toLowerCase().includes(query) ||
         order.customer.wa_phone.toLowerCase().includes(query);
       return matchesFulfillment && matchesQuery;
@@ -539,7 +529,7 @@ export function DashboardOrdersPage() {
       setDetailOrder((current) =>
         current && current.id === updated.id ? updated : current,
       );
-      toast.success(`Order #${updated.order_no} updated.`);
+      toast.success(`Order ${updated.order_code} updated.`);
     } catch (error) {
       toast.error(
         error instanceof ApiError ? error.message : "Couldn't update this order.",

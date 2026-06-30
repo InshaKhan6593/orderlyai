@@ -44,6 +44,7 @@ class Order(UUIDMixin, TimestampMixin, Base):
     __tablename__ = "orders"
     __table_args__ = (
         UniqueConstraint("business_id", "order_no", name="orders_business_no"),
+        UniqueConstraint("business_id", "order_code", name="orders_business_code"),
         CheckConstraint(
             "status in ('pending','accepted','rejected','preparing','ready',"
             "'out_for_delivery','completed','cancelled')",
@@ -65,7 +66,8 @@ class Order(UUIDMixin, TimestampMixin, Base):
     customer_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("customers.id", ondelete="RESTRICT"), index=True, nullable=False
     )
-    order_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    order_no: Mapped[int] = mapped_column(Integer, nullable=False)  # internal counter (not shown)
+    order_code: Mapped[str] = mapped_column(String(12), nullable=False)  # customer-facing code
     channel: Mapped[str] = mapped_column(String(16), default="whatsapp", nullable=False)
     status: Mapped[str] = mapped_column(String(24), default="pending", nullable=False, index=True)
     fulfillment: Mapped[str] = mapped_column(String(16), nullable=False)

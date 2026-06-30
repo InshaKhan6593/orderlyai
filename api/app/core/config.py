@@ -98,6 +98,20 @@ class Settings(BaseSettings):
     # those models usable (and faster); ignored by non-reasoning models. See app/agent/runtime.py.
     agent_disable_reasoning: bool = True
 
+    # OpenRouter provider routing (only used when llm_provider == "openrouter"). An OpenRouter
+    # model slug is load-balanced across MANY upstream providers; one can blip and return an
+    # opaque "Provider returned error" (400), or not honor the agent's forced structured-output
+    # tool call. Pin which providers may serve the model so a turn never lands on a flaky one.
+    # `openrouter_provider_order`: comma-separated provider slugs in preference order, e.g.
+    # "Alibaba,DeepInfra,Novita" (Alibaba is Qwen's first-party host). Empty = OpenRouter's
+    # default routing. The slugs MUST be providers that actually serve YOUR model — a Qwen pin
+    # won't serve a Claude slug (that needs Anthropic/Amazon Bedrock/Google), so clear/adjust
+    # this if you change AGENT_MODEL's family. With `allow_fallbacks` False, OpenRouter uses
+    # ONLY these (tried in order) and errors if none can serve — the worker then retries.
+    # See `_make_model` in app/agent/runtime.py.
+    openrouter_provider_order: str = ""
+    openrouter_provider_allow_fallbacks: bool = True
+
     # Agent durable memory + inbound worker.
     # `whatsapp_durable_memory`: use the Postgres checkpointer (survives restarts) instead
     # of the in-process MemorySaver. `run_agent_worker`: on app startup, build the durable

@@ -101,6 +101,26 @@ def test_whatsapp_connection_saves_meta_fields_without_echoing_token(client, bus
     assert loaded.json()["has_access_token"] is True
 
 
+def test_whatsapp_connection_rejects_non_ascii_access_token(client, business):
+    # A token mangled by copy-paste (here an em-dash) is rejected at the API boundary (422) rather
+    # than stored only to blow up later when it can't be ASCII-encoded into the send's HTTP header.
+    headers, business_id = business
+
+    data = {
+        "mode": "test",
+        "waba_id": "123456789012345",
+        "phone_number_id": str(uuid.uuid4().int)[:15],
+        "access_token": "EAAG" + chr(0x2014) + "smart-dash-token",
+    }
+    r = client.put(
+        f"/api/v1/businesses/{business_id}/whatsapp-connection",
+        json=data,
+        headers=headers,
+    )
+
+    assert r.status_code == 422, r.text
+
+
 def test_whatsapp_connection_requires_token_on_first_save(client, business):
     headers, business_id = business
 
@@ -536,10 +556,10 @@ def test_agent_input_mapping():
     # A list-row product tap forwards the item name as the customer's choice.
     text, confirmed = _agent_input({"reply_id": "product:abc", "text": "Smokey Burger"})
     assert text == "Smokey Burger" and confirmed is False
-    # A reorder button tap carries the order number into a reorder instruction (never confirmed).
-    text, confirmed = _agent_input({"reply_id": "reorder:2", "text": "Reorder"})
-    assert "order #2" in text and confirmed is False
-    assert _agent_input({"reply_id": "reorder:x", "text": "Reorder"})[0] == "Please reorder my last order."
+    # A reorder button tap carries the order code into a reorder instruction (never confirmed).
+    text, confirmed = _agent_input({"reply_id": "reorder:K7Q2X9", "text": "Reorder"})
+    assert "K7Q2X9" in text and confirmed is False
+    assert _agent_input({"reply_id": "reorder:", "text": "Reorder"})[0] == "Please reorder my last order."
     # Plain text passes through; empty/no message is ignored.
     assert _agent_input({"reply_id": "", "text": "hi"}) == ("hi", False)
     assert _agent_input({"reply_id": "", "text": ""}) == (None, False)

@@ -76,7 +76,8 @@ class OrderOut(ORMModel):
     id: uuid.UUID
     business_id: uuid.UUID
     customer_id: uuid.UUID
-    order_no: int
+    order_no: int  # internal sequence (kept for the owner's records; not shown as the order id)
+    order_code: str  # the customer-facing order id (e.g. "K7Q2X9")
     channel: str
     status: str
     fulfillment: str

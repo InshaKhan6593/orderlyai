@@ -35,8 +35,17 @@ from app.agent.schemas import (
     BTN_CANCEL,
     BTN_CONFIRM,
     BTN_EDIT,
+    BTN_FUL_DELIVERY,
+    BTN_FUL_PICKUP,
+    BTN_UPDATE_CONFIRM,
+    BTN_UPDATE_KEEP,
+    ROW_ZONE_PREFIX,
     AgentReply,
     ButtonsMessage,
+    ImageMessage,
+    ListMessage,
+    ListRow,
+    ListSection,
     ReplyButton,
     TextMessage,
 )
@@ -75,17 +84,28 @@ def _make_model(model_id: str) -> Any:
     if settings.llm_provider == "openrouter":
         from langchain_openai import ChatOpenAI
 
+        extra_body: dict[str, Any] = {}
         # Turn off reasoning/thinking on OpenRouter. The agent forces a structured AgentReply
         # tool call (tool_choice=required); reasoning models reject that in thinking mode (400).
         # OpenRouter ignores `reasoning` for models that don't support it, so this is safe.
-        extra_body = {"reasoning": {"enabled": False}} if settings.agent_disable_reasoning else None
+        if settings.agent_disable_reasoning:
+            extra_body["reasoning"] = {"enabled": False}
+        # Pin upstream providers (see settings.openrouter_provider_order). A model slug is
+        # load-balanced across many providers; without this a turn can land on one that blips
+        # with an opaque 400 or won't honor the forced tool call. Empty list = default routing.
+        provider_order = [p.strip() for p in settings.openrouter_provider_order.split(",") if p.strip()]
+        if provider_order:
+            extra_body["provider"] = {
+                "order": provider_order,
+                "allow_fallbacks": settings.openrouter_provider_allow_fallbacks,
+            }
         return ChatOpenAI(
             model=model_id,
             base_url=settings.openrouter_base_url,
             api_key=settings.openrouter_api_key,
             temperature=0,
             default_headers={"X-Title": settings.app_name},
-            extra_body=extra_body,
+            extra_body=extra_body or None,
         )
     return init_chat_model(model_id, temperature=0)
 
@@ -321,9 +341,14 @@ def _ensure_confirm_buttons(reply: AgentReply, summary: str | None) -> AgentRepl
             ReplyButton(id=BTN_CANCEL, title="Cancel"),
         ],
     )
-    # Drop any non-canonical buttons the model emitted (wrong ids won't flip `confirmed`), keep
-    # its text/image, and leave room for ours (AgentReply allows at most 4 messages).
-    kept = [m for m in reply.messages if not isinstance(m, ButtonsMessage)]
+    # When we render the deterministic, server-priced summary in the button body, IT is the single
+    # source of truth — drop the model's own text (it usually re-summarizes the order too, which
+    # showed the customer the summary TWICE). Keep an image if the model included one. With no
+    # summary, keep the model's text/image and just add the buttons.
+    if summary:
+        kept = [m for m in reply.messages if isinstance(m, ImageMessage)]
+    else:
+        kept = [m for m in reply.messages if not isinstance(m, ButtonsMessage)]
     return AgentReply(messages=kept[:3] + [buttons], handoff=reply.handoff)
 
 
@@ -339,14 +364,10 @@ def _text_reply(body: str) -> AgentReply:
 
 
 # --- Deterministic contact collection -------------------------------------------------------- #
-# The model never sets contact values. When a required field is missing, place_order sets
-# ``pending_contact_field``; run_turn asks the question below, then validates + stores the typed
-# reply in code (server-side, via ContactDetails) before the next model turn.
-_CONTACT_STATE_KEY = {
-    "name": "customer_name",
-    "email": "customer_email",
-    "alternate_phone": "customer_alt_phone",
-}
+# The model never sets contact values. When the required name is missing, place_order sets
+# ``pending_checkout_field="name"``; run_turn asks the question below, then validates + stores the
+# typed reply in code (server-side, via ContactDetails) before the next model turn. Email and
+# alternate phone are OPTIONAL — they are only ever changed through the update_detail flow.
 _CONTACT_QUESTIONS = {
     "name": "Almost done! What name should we put on the order?",
     "email": "What email should we use for the order?",
@@ -381,6 +402,223 @@ def _capture_contact(field: str, text: str) -> tuple[str | None, str | None]:
     return str(value), None
 
 
+# --- Deterministic checkout slots (fulfillment + address) + detail-update confirmation -------- #
+# place_order sets ``pending_checkout_field`` for a missing required slot; the model never
+# collects these. run_turn asks deterministically and captures the tap/typed reply in code.
+_RETRIGGER = "Please go ahead and place my order."  # synthetic text that re-enters place_order
+_CHECKOUT_QUESTIONS = {
+    # The delivery AREA is picked first (zone slot); this is the street address for the driver.
+    "address": (
+        "What's the full delivery address - house/flat, street, and any landmark? "
+        "(Or reply 'pickup' to collect it instead.)"
+    ),
+    "name": _CONTACT_QUESTIONS["name"],
+}
+_ZONE_TEXT_FALLBACK = "What area should we deliver to?"
+# Maps an update_detail field to the state key it writes (the model proposes the value via
+# update_detail; the customer's Update tap is what actually applies + persists it).
+_UPDATE_STATE_KEY = {
+    "name": "customer_name",
+    "email": "customer_email",
+    "alternate_phone": "customer_alt_phone",
+    "address": "address",
+}
+_UPDATE_FIELD_LABEL = {
+    "name": "name",
+    "email": "email",
+    "alternate_phone": "alternate phone",
+    "address": "delivery address",
+    "area": "delivery area",
+}
+
+
+def _render_fulfillment_question() -> AgentReply:
+    """Deterministic Delivery/Pickup choice (asked when the business offers both)."""
+    return AgentReply(
+        messages=[
+            ButtonsMessage(
+                kind="buttons",
+                body="Will this be delivery or pickup?",
+                buttons=[
+                    ReplyButton(id=BTN_FUL_DELIVERY, title="Delivery"),
+                    ReplyButton(id=BTN_FUL_PICKUP, title="Pickup"),
+                ],
+            )
+        ]
+    )
+
+
+def _render_zone_list(zone_choices: list[dict[str, Any]], body: str | None) -> AgentReply:
+    """Deterministic 'pick your delivery area' list — each row is one active zone; a tap selects it
+    exactly (no address-text guessing) and confirms serviceability. Used when the zones fit a
+    WhatsApp list (<= 10 rows); with more zones than that, run_turn asks for the area as text."""
+    rows = [
+        ListRow(id=c["id"], title=c["title"], description=c.get("description"))
+        for c in zone_choices
+    ]
+    return AgentReply(
+        messages=[
+            ListMessage(
+                kind="list",
+                body=body or _ZONE_TEXT_FALLBACK,
+                button="Select area",
+                sections=[ListSection(title="Delivery areas", rows=rows)],
+            )
+        ]
+    )
+
+
+def _describe_update(upd: dict[str, Any], current: dict[str, Any]) -> str:
+    """One 'email to *x@y.com* (currently old)' clause for the confirm prompt."""
+    field = upd["field"]
+    label = _UPDATE_FIELD_LABEL.get(field, field)
+    if field == "area":  # the saved area is a zone id, not a readable name — skip the "currently"
+        return f"{label} to *{upd['value']}*"
+    old = current.get(_UPDATE_STATE_KEY[field])
+    was = f" (currently {old})" if old else ""
+    return f"{label} to *{upd['value']}*{was}"
+
+
+def _render_update_confirm(updates: list[dict[str, Any]], current: dict[str, Any]) -> AgentReply:
+    """Deterministic 'update your saved <detail(s)>?' confirmation — the customer's tap applies
+    them. Handles several pending changes at once (one combined prompt, one Update tap), so a
+    request like 'change my email and alternate number' is confirmed together, not piecemeal."""
+    clauses = [_describe_update(u, current) for u in updates]
+    if len(clauses) == 1:
+        body = f"Update your {clauses[0]}?"
+    elif len(clauses) == 2:
+        body = f"Update your {clauses[0]} and {clauses[1]}?"
+    else:
+        body = "Update your " + ", ".join(clauses[:-1]) + f", and {clauses[-1]}?"
+    return AgentReply(
+        messages=[
+            ButtonsMessage(
+                kind="buttons",
+                body=body,
+                buttons=[
+                    ReplyButton(id=BTN_UPDATE_CONFIRM, title="Update"),
+                    ReplyButton(id=BTN_UPDATE_KEEP, title="Keep current"),
+                ],
+            )
+        ]
+    )
+
+
+def _capture_checkout(
+    values: dict[str, Any], text: str, reply_id: str | None, confirmed: bool
+) -> tuple[dict[str, Any] | None, AgentReply | None, str | None]:
+    """Deterministically capture a checkout slot or a detail-update confirmation.
+
+    Returns ``(state_overrides, early_reply, new_text)``:
+    - ``early_reply`` not None  → run_turn returns it immediately (a re-ask / confirm prompt).
+    - otherwise ``state_overrides`` is merged and the agent is re-triggered with ``new_text``.
+    - ``(None, None, None)`` → nothing pending this turn; run the model normally.
+    The model never supplies these values — code validates the typed reply / button tap.
+    """
+    # (a) Detail-update(s) awaiting the customer's tap: apply ALL on Update, drop all on Keep.
+    pending = values.get("pending_updates") or []
+    if pending:
+        clear = {"pending_updates": None}  # the reducer resets the queue to empty
+        if reply_id == BTN_UPDATE_CONFIRM:
+            overrides: dict[str, Any] = {**clear}
+            fields = {u["field"] for u in pending}
+            for upd in pending:
+                if upd["field"] == "area":
+                    # Re-resolve the new AREA against the real zones (place_order matches
+                    # zone_query) and re-collect the street address within it — unless a street
+                    # address change was sent in the same batch (then keep the one they gave).
+                    overrides["zone_query"] = upd["value"]
+                    overrides["zone_id"] = None
+                    overrides["zone_serviceable"] = None
+                    if "address" not in fields:
+                        overrides["address"] = None
+                else:
+                    # name / email / alternate_phone / address (street) → write the saved field. A
+                    # street-address change stays WITHIN the same area, so it does NOT touch the zone.
+                    overrides[_UPDATE_STATE_KEY[upd["field"]]] = upd["value"]
+            return overrides, None, _RETRIGGER
+        if reply_id == BTN_UPDATE_KEEP:
+            return clear, None, _RETRIGGER
+        # Any other reply while awaiting the tap → re-show the confirm buttons.
+        return None, _render_update_confirm(pending, values), None
+
+    # (b) A required slot is being collected: fulfillment / address / name.
+    field = values.get("pending_checkout_field")
+    if not field or confirmed:
+        return None, None, None
+    # A tap that isn't a recognized answer for this slot → don't capture; let the model handle it
+    # (e.g. the customer tapped a product row to change the order while we were asking the name).
+    if reply_id and not (
+        (field == "fulfillment" and reply_id in (BTN_FUL_DELIVERY, BTN_FUL_PICKUP))
+        or (field == "zone" and reply_id.startswith(ROW_ZONE_PREFIX))
+    ):
+        return None, None, None
+    cleaned = " ".join((text or "").split())
+    if not reply_id and cleaned.lower() in _CONTACT_ABORT_WORDS:
+        # Change of mind → drop the prompt and let the agent handle it conversationally.
+        return {"pending_checkout_field": None}, None, text
+
+    if field == "fulfillment":
+        ful = None
+        if reply_id == BTN_FUL_DELIVERY or "deliver" in cleaned.lower():
+            ful = "delivery"
+        elif reply_id == BTN_FUL_PICKUP or "pick" in cleaned.lower() or "collect" in cleaned.lower():
+            ful = "pickup"
+        if ful is None:
+            return None, _render_fulfillment_question(), None
+        return {"fulfillment": ful, "pending_checkout_field": None}, None, _RETRIGGER
+
+    if field == "zone":
+        # An exact area tap → select that zone and confirm serviceability.
+        if reply_id and reply_id.startswith(ROW_ZONE_PREFIX):
+            return (
+                {"zone_id": reply_id[len(ROW_ZONE_PREFIX) :], "zone_serviceable": True,
+                 "zone_choices": None, "zone_prompt": None, "zone_query": None,
+                 "pending_checkout_field": None},
+                None, _RETRIGGER,
+            )
+        if cleaned.lower() in ("pickup", "pick up", "collect"):  # bail out of delivery → pickup
+            return (
+                {"fulfillment": "pickup", "zone_id": None, "zone_serviceable": None,
+                 "zone_choices": None, "zone_prompt": None, "zone_query": None,
+                 "pending_checkout_field": None},
+                None, _RETRIGGER,
+            )
+        if cleaned:
+            # A typed area → place_order matches it against the zones (and re-asks if no match).
+            return (
+                {"zone_query": cleaned, "zone_choices": None, "zone_prompt": None,
+                 "pending_checkout_field": None},
+                None, _RETRIGGER,
+            )
+        # Empty/unrecognized → re-show however we last asked (the list, or a text question).
+        choices = values.get("zone_choices")
+        if choices:
+            return None, _render_zone_list(choices, values.get("zone_prompt")), None
+        return None, _text_reply(values.get("zone_prompt") or _ZONE_TEXT_FALLBACK), None
+
+    if field == "address":
+        if cleaned.lower() in ("pickup", "pick up", "collect"):
+            return (
+                {"fulfillment": "pickup", "address": None, "zone_id": None,
+                 "zone_serviceable": None, "pending_checkout_field": None},
+                None, _RETRIGGER,
+            )
+        if not cleaned:
+            return None, _text_reply(_CHECKOUT_QUESTIONS["address"]), None
+        # The AREA (zone) was already chosen before this step, so the street address stays WITHIN
+        # it — don't clear the zone here (that would loop back to re-asking the area).
+        return ({"address": cleaned, "pending_checkout_field": None}, None, _RETRIGGER)
+
+    if field == "name":
+        value, error = _capture_contact("name", text)
+        if error:
+            return None, _text_reply(error), None
+        return {"customer_name": value, "pending_checkout_field": None}, None, _RETRIGGER
+
+    return None, None, None
+
+
 async def run_turn(
     agent: Any,
     *,
@@ -411,20 +649,17 @@ async def run_turn(
         # Mute window elapsed → resume the bot, clearing the handoff flags for this turn.
         resume_overrides = {"step": "browsing", "handoff_reason": None, "handoff_at": None}
 
-    # Deterministic contact capture: if we're collecting a field and the customer typed a plain
-    # reply (not a button tap / confirm), validate + store it in CODE here — the model never sets
-    # contact values. An abort word drops the prompt and lets the agent handle the change of mind.
+    # Deterministic checkout capture: if we're collecting a slot (fulfillment / address / name) or
+    # awaiting a detail-update tap, validate + store it in CODE here — the model never sets these
+    # values. A re-ask is returned immediately; a captured value re-triggers place_order.
     capture_overrides: dict[str, Any] = {}
-    pending = values.get("pending_contact_field")
-    if pending and not confirmed and not reply_id:
-        if " ".join((text or "").split()).lower() in _CONTACT_ABORT_WORDS:
-            capture_overrides = {"pending_contact_field": None}
-        else:
-            value, error = _capture_contact(pending, text)
-            if error:
-                return _text_reply(error)  # re-ask; pending stays set in the checkpoint
-            capture_overrides = {_CONTACT_STATE_KEY[pending]: value, "pending_contact_field": None}
-            text = "Please go ahead and place my order."  # value already saved in code above
+    overrides, early_reply, new_text = _capture_checkout(values, text, reply_id, confirmed)
+    if early_reply is not None:
+        return early_reply
+    if overrides is not None:
+        capture_overrides = overrides
+        if new_text is not None:
+            text = new_text
 
     result = await agent.ainvoke(
         {
@@ -436,6 +671,12 @@ async def run_turn(
             "awaiting_confirm": False,
             "confirm_summary": None,
             "order_placed_summary": None,
+            # Area-pick prompt state is re-set by place_order each turn when it (re-)asks; reset it
+            # here so a resolved/stale area question can't linger and re-render. capture_overrides
+            # (spread last) re-supplies zone_query when the customer typed an area this turn.
+            "zone_choices": None,
+            "zone_prompt": None,
+            "zone_query": None,
             **resume_overrides,
             **capture_overrides,  # deterministically-captured contact value + cleared pending flag
         },
@@ -448,11 +689,25 @@ async def run_turn(
     placed_summary = result.get("order_placed_summary")
     if placed_summary:
         return _text_reply(placed_summary)
-    # A required contact field is missing → ask for it with a fixed, code-rendered question (the
-    # next typed reply is captured deterministically above, not by the model).
-    pending_now = result.get("pending_contact_field")
-    if pending_now:
-        return _text_reply(_CONTACT_QUESTIONS.get(pending_now, _CONTACT_QUESTIONS["name"]))
+    # A detail-update was proposed this turn (model called update_detail) → ask the customer to
+    # confirm it deterministically; their tap (next turn) applies + persists the new value.
+    updates_now = result.get("pending_updates")
+    if updates_now:
+        return _render_update_confirm(updates_now, result)
+    # A required checkout slot is missing → ask for it with a fixed, code-rendered prompt (the
+    # next reply is captured deterministically above, not by the model).
+    pending_now = result.get("pending_checkout_field")
+    if pending_now == "fulfillment":
+        return _render_fulfillment_question()
+    if pending_now == "zone":
+        # A list of the delivery areas to tap (exact pick), or a free-text ask when there are
+        # more zones than a WhatsApp list can hold. The body carries any out-of-area apology.
+        choices = result.get("zone_choices")
+        if choices:
+            return _render_zone_list(choices, result.get("zone_prompt"))
+        return _text_reply(result.get("zone_prompt") or _ZONE_TEXT_FALLBACK)
+    if pending_now in ("address", "name"):
+        return _text_reply(_CHECKOUT_QUESTIONS[pending_now])
     reply = result.get("structured_response")
     if reply is not None and not _has_current_structured_response(result):
         raise RuntimeError("Agent did not produce a valid structured response for the latest turn.")

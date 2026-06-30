@@ -21,10 +21,13 @@ import time
 import uuid
 from dataclasses import dataclass
 
+from sqlalchemy import select
+
 from app.agent import catalog
 from app.agent.prompts import BusinessBrief
 from app.core.config import settings
 from app.core.db import SessionLocal
+from app.models.customer import Customer
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,7 +44,7 @@ class AgentSnapshot:
 _CACHE: dict[str, tuple[float, AgentSnapshot]] = {}
 
 
-def _brief(business, menu_index: str | None) -> BusinessBrief:
+def _brief(business, menu_index: str | None, delivery_zones_summary: str) -> BusinessBrief:
     """Render the per-tenant prompt brief off the eager-loaded business."""
     cfg = business.agent_config
     hours = list(business.hours)
@@ -60,6 +63,7 @@ def _brief(business, menu_index: str | None) -> BusinessBrief:
         greeting=(cfg.greeting_message if cfg else None)
         or f"Hi! Welcome to {business.name}. How can I help?",
         categories_summary=", ".join(catalog.category_names(business)),
+        delivery_zones_summary=delivery_zones_summary,
         extra_instructions=cfg.extra_instructions if cfg else None,
         handoff_phone=cfg.human_handoff_phone if cfg else None,
         menu_index=menu_index,
@@ -73,13 +77,73 @@ async def _build(business_id: uuid.UUID) -> AgentSnapshot | None:
         if business is None:
             return None
         menu_text = await catalog.menu_overview(s, business)
+        # Computed inside the session (delivery_zones queries) so the agent can answer
+        # "where do you deliver?" from the prompt — the data, not a deterministic-checkout secret.
+        zones_summary = catalog.zones_summary(
+            await catalog.delivery_zones(s, business), business.currency
+        )
 
     budget = settings.agent_menu_preload_max_chars
     preloaded = budget > 0 and len(menu_text) <= budget
     return AgentSnapshot(
-        brief=_brief(business, menu_text if preloaded else None),
+        brief=_brief(business, menu_text if preloaded else None, zones_summary),
         menu_preloaded=preloaded,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class CustomerBrief:
+    """The saved profile for one returning customer, fed into the system prompt so the agent can
+    greet them by name and offer their usual delivery address. Loaded server-side from the
+    customer record (keyed by business + WhatsApp phone) — never supplied by the model."""
+
+    name: str | None
+    default_address: str | None
+    order_count: int
+
+
+# (business_id, phone) -> (expires_at_monotonic, brief|None). TTL-bounded; cleared wholesale if it
+# ever grows past the cap so a long-running process can't leak memory across many customers.
+_CUSTOMER_CACHE: dict[tuple[str, str], tuple[float, "CustomerBrief | None"]] = {}
+_CUSTOMER_CACHE_MAX = 10_000
+
+
+async def get_customer_brief(business_id: uuid.UUID, phone: str) -> CustomerBrief | None:
+    """The returning-customer profile for (business, phone), cached briefly like the snapshot.
+
+    Returns ``None`` for a first-time/unknown sender. Scoped by ``business_id`` AND ``wa_phone``,
+    so one tenant's agent can never read another tenant's customer (tenant isolation).
+    """
+    ttl = settings.agent_snapshot_ttl_seconds
+    key = (str(business_id), phone)
+    now = time.monotonic()
+
+    if ttl > 0:
+        cached = _CUSTOMER_CACHE.get(key)
+        if cached is not None and cached[0] > now:
+            return cached[1]
+
+    async with SessionLocal() as s:
+        customer = await s.scalar(
+            select(Customer).where(
+                Customer.business_id == business_id, Customer.wa_phone == phone
+            )
+        )
+    brief = (
+        None
+        if customer is None
+        else CustomerBrief(
+            name=customer.name,
+            default_address=customer.default_address,
+            order_count=customer.order_count,
+        )
+    )
+
+    if ttl > 0:
+        if len(_CUSTOMER_CACHE) >= _CUSTOMER_CACHE_MAX:
+            _CUSTOMER_CACHE.clear()
+        _CUSTOMER_CACHE[key] = (now + ttl, brief)
+    return brief
 
 
 async def get_snapshot(business_id: uuid.UUID) -> AgentSnapshot | None:

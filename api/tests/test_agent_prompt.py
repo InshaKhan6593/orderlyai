@@ -5,6 +5,7 @@ from app.agent.prompts import (
     BusinessBrief,
     base_chat_prompt,
     build_system_prompt,
+    customer_block,
     prompt_variables,
     render_system_prompt,
 )
@@ -93,6 +94,32 @@ def test_categories_listed_in_prompt():
     assert "category" in p.lower()
 
 
+def test_delivery_areas_listed_in_prompt():
+    # Regression: the agent could not answer "where do you deliver?" because the zones were never
+    # given to it. Now the active areas are inlined so it can reason and tell the customer.
+    p = build_system_prompt(_brief(delivery_zones_summary="Gulberg (80 PKR), DHA (120 PKR)"))
+    assert "Gulberg (80 PKR)" in p
+    assert "DHA (120 PKR)" in p
+    assert "Delivery areas" in p
+    # ...and it's told to answer coverage questions from these facts (not via place_order).
+    assert "whether you cover their area" in p
+
+
+def test_delivery_areas_hint_when_no_zones_configured():
+    # Delivery offered but no zones set → tell the agent to confirm the address at checkout.
+    p = build_system_prompt(_brief(offers_delivery=True, delivery_zones_summary=""))
+    assert "confirm the customer's address at checkout" in p
+
+
+def test_no_delivery_area_line_for_pickup_only_business():
+    # A pickup-only business must not advertise delivery areas, even if stale data is passed.
+    p = build_system_prompt(
+        _brief(offers_delivery=False, offers_pickup=True,
+               delivery_zones_summary="Gulberg (80 PKR)")
+    )
+    assert "Gulberg (80 PKR)" not in p
+
+
 def test_menu_not_inlined_points_to_get_menu():
     # With no inlined menu (large menu / unknown size), the prompt tells the model to fetch it.
     p = build_system_prompt(_brief())  # menu_index defaults to None
@@ -120,11 +147,21 @@ def test_whatsapp_output_rules_present():
     assert "max 20 chars" in p
 
 
+def test_prompt_encourages_using_bold_for_key_details():
+    # Beyond explaining the syntax, the prompt tells the agent to actually USE bold for what a
+    # customer scans for (item names, prices, total) and to hug the markers to the text.
+    p = build_system_prompt(_brief())
+    assert "stand out with *bold*" in p
+    assert "hug" in p.lower()
+
+
 def test_prompt_blocks_ambiguous_full_menu_dump():
     p = build_system_prompt(_brief())
     assert "never use a list to show every product across the whole menu" in p.lower()
-    assert "For a full-menu request" in p
-    assert "send TEXT" in p
+    assert "full-menu request" in p.lower()
+    # A full-menu request becomes a tappable CATEGORY dropdown (or text if too many categories),
+    # never a product dump.
+    assert "CATEGORY list" in p
 
 
 def test_prompt_restricts_interactive_ids_to_worker_contract():
@@ -133,7 +170,9 @@ def test_prompt_restricts_interactive_ids_to_worker_contract():
     assert "confirm_order" in p
     assert "edit_cart" in p
     assert "cancel_order" in p
-    assert "Product lists may contain product rows only" in p
+    # Row ids follow the worker contract: products are "product:<id>", categories "category:<name>".
+    assert 'product row id MUST be "product:"' in p
+    assert 'category row id MUST be "category:"' in p
 
 
 def test_prompt_requires_single_valid_structured_reply():
@@ -141,6 +180,33 @@ def test_prompt_requires_single_valid_structured_reply():
     assert "exactly one AgentReply tool call" in p
     assert "valid JSON" in p
     assert "No extra text outside AgentReply" in p
+
+
+def test_prompt_offers_saved_delivery_address():
+    # The cart flow must tell the agent to offer a returning customer's saved address.
+    p = build_system_prompt(_brief())
+    assert "RETURNING CUSTOMER" in p
+    assert "saved delivery address" in p.lower()
+
+
+def test_customer_block_personalises_with_saved_details():
+    block = customer_block(name="Ada", default_address="12 Park Lane", order_count=3)
+    assert block is not None
+    assert "RETURNING CUSTOMER" in block
+    assert "Ada" in block
+    assert "12 Park Lane" in block
+    assert "ordered from you 3" in block
+
+
+def test_customer_block_partial_profile_only_shows_known_fields():
+    block = customer_block(name="Ada", default_address=None, order_count=0)
+    assert block is not None and "Ada" in block
+    assert "delivery address" not in block.lower()  # nothing saved → not mentioned
+
+
+def test_customer_block_empty_profile_is_none():
+    # A first-time sender with no saved details adds no personalisation block at all.
+    assert customer_block(name=None, default_address=None, order_count=0) is None
 
 
 def test_prompt_describes_reordering():
@@ -151,6 +217,34 @@ def test_prompt_describes_reordering():
     assert "get_order_status" in p
     # The reorder button id contract: "reorder:" + the order number.
     assert "reorder:" in p
+
+
+def test_prompt_sections_wrapped_in_xml_tags():
+    # Sections are delimited with semantic XML tags (Anthropic-recommended structure) so the
+    # model parses instruction boundaries reliably.
+    p = build_system_prompt(_brief())
+    for tag in ("role", "menu", "how_you_work", "ordering_flow", "whatsapp_output"):
+        assert f"<{tag}>" in p and f"</{tag}>" in p
+
+
+def test_prompt_explains_each_whatsapp_message_kind():
+    # The output rules must teach WHEN to use each WhatsApp message kind, with the dropdown
+    # (category list) and the specific-dish image behaviour the owner asked for.
+    p = build_system_prompt(_brief())
+    assert "CHOOSE THE MESSAGE KIND" in p
+    assert "CATEGORY list" in p and "PRODUCT list" in p
+    assert "IMAGE" in p
+    assert "category:" in p  # category-row id contract for the dropdown
+    # Buttons stay reserved (confirm flow + the single reorder offer), not for browsing.
+    assert "almost never yours to send" in p
+
+
+def test_returning_customer_block_wrapped_in_xml_tag():
+    block = customer_block(name="Ada", default_address="12 Park Lane", order_count=2)
+    assert block is not None
+    assert block.startswith("<returning_customer>")
+    assert block.endswith("</returning_customer>")
+    assert "RETURNING CUSTOMER" in block
 
 
 def test_prompt_describes_automatic_confirm_buttons():

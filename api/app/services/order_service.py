@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.errors import BadRequestError, NotFoundError
+from app.core.order_code import business_salt, encode_order_code
 from app.models.business import Business
 from app.models.customer import Customer
 from app.models.menu import ModifierGroup, Product, ProductModifierGroup
@@ -272,6 +273,7 @@ async def _upsert_customer_id(
     email: str | None = None,
     alternate_phone: str | None = None,
     default_address: str | None = None,
+    default_zone_id: uuid.UUID | None = None,
 ) -> uuid.UUID:
     """Atomically upsert (business_id, wa_phone) and return the customer id.
 
@@ -287,6 +289,7 @@ async def _upsert_customer_id(
         email=email,
         alternate_phone=alternate_phone,
         default_address=default_address,
+        default_zone_id=default_zone_id,
     )
     stmt = stmt.on_conflict_do_update(
         constraint="customers_business_phone",
@@ -298,6 +301,9 @@ async def _upsert_customer_id(
             ),
             "default_address": func.coalesce(
                 stmt.excluded.default_address, Customer.default_address
+            ),
+            "default_zone_id": func.coalesce(
+                stmt.excluded.default_zone_id, Customer.default_zone_id
             ),
         },
     ).returning(Customer.id)
@@ -376,8 +382,9 @@ async def create_order(db: AsyncSession, business: Business, data: OrderCreate) 
         data.customer_name,
         email=data.customer_email,
         alternate_phone=data.customer_alt_phone,
-        # Save a delivery address as the customer's default so it prefills next time.
+        # Save a delivery address + area as the customer's defaults so they prefill next time.
         default_address=data.address if data.fulfillment == "delivery" else None,
+        default_zone_id=data.zone_id if data.fulfillment == "delivery" else None,
     )
 
     products = await _load_products(
@@ -412,10 +419,14 @@ async def create_order(db: AsyncSession, business: Business, data: OrderCreate) 
     )
     total = subtotal + delivery_fee + packaging_fee
 
+    # Atomic per-business counter, then the customer-facing code derived from it (unique by
+    # construction — see app/core/order_code.py — so no extra round-trip or collision retry).
+    order_no = await _next_order_no(db, business.id)
     order = Order(
         business_id=business.id,
         customer_id=customer_id,
-        order_no=await _next_order_no(db, business.id),
+        order_no=order_no,
+        order_code=encode_order_code(order_no, salt=business_salt(business.id)),
         fulfillment=data.fulfillment,
         address=data.address,
         zone_id=zone_id,

@@ -241,3 +241,23 @@ def match_zone(zones: list[DeliveryZone], area_or_address: str) -> DeliveryZone 
         if overlap > best[0]:
             best = (overlap, z)
     return best[1]
+
+
+def zones_summary(zones: list[DeliveryZone], currency: str, *, max_listed: int = 20) -> str:
+    """A compact, model-facing list of the delivery areas (name + fee) for the system prompt, so
+    the agent can ANSWER "where do you deliver / do you cover my area / what's the fee" itself.
+
+    Empty when there are no active zones (the builder turns that into a 'no set zones' hint). Capped
+    so a tenant with very many zones can't bloat the prompt — the overflow is summarised as a count.
+    """
+    if not zones:
+        return ""
+    shown = zones[:max_listed]
+    parts = [
+        f"{z.name} ({z.fee} {currency})" if z.fee and z.fee > 0 else f"{z.name} (free)"
+        for z in shown
+    ]
+    extra = len(zones) - len(shown)
+    if extra > 0:
+        parts.append(f"and {extra} more areas")
+    return ", ".join(parts)

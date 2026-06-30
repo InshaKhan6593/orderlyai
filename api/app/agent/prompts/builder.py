@@ -24,6 +24,9 @@ class BusinessBrief:
     upsell_enabled: bool
     greeting: str
     categories_summary: str = ""
+    # Active delivery areas as "Gulberg (80 PKR), DHA (free)", so the agent can answer
+    # "where do you deliver / do you cover my area / what's the fee" from the prompt. "" → none set.
+    delivery_zones_summary: str = ""
     extra_instructions: str | None = None
     handoff_phone: str | None = None
     # The pre-rendered menu index (name/price/tags/id), inlined into the prompt when it fits
@@ -39,6 +42,16 @@ def _fulfillment_line(b: BusinessBrief) -> str:
     if b.offers_pickup:
         return "You offer pickup only (no delivery)."
     return "You are not currently offering delivery or pickup."
+
+
+def _delivery_areas_line(b: BusinessBrief) -> str:
+    """The 'Delivery areas: ...' fact line, so the agent can answer delivery-coverage questions
+    itself. Empty for a pickup-only business; a confirm-at-checkout hint when no zones are set."""
+    if not b.offers_delivery:
+        return ""
+    if b.delivery_zones_summary:
+        return f"Delivery areas (name and fee): {b.delivery_zones_summary}."
+    return "Delivery areas: no set zones - confirm the customer's address at checkout."
 
 
 def _menu_block(b: BusinessBrief) -> str:
@@ -80,6 +93,7 @@ def prompt_variables(b: BusinessBrief) -> dict[str, str]:
         "currency": b.currency,
         "hours_summary": b.hours_summary,
         "fulfillment_line": _fulfillment_line(b),
+        "delivery_areas_line": _delivery_areas_line(b),
         "packaging_fee": b.packaging_fee,
         "min_order_amount": b.min_order_amount,
         "status_note": status_note,
@@ -93,7 +107,7 @@ def prompt_variables(b: BusinessBrief) -> dict[str, str]:
             else ""
         ),
         "extra": (
-            f"\n\nBusiness-specific instructions:\n{b.extra_instructions}"
+            f"\n\n<business_instructions>\n{b.extra_instructions}\n</business_instructions>"
             if b.extra_instructions
             else ""
         ),
@@ -105,3 +119,34 @@ def build_system_prompt(b: BusinessBrief) -> str:
     of truth. ``hub.render_system_prompt`` wraps this with an optional LangSmith
     pull-override; this function itself stays dependency-free and trivially testable."""
     return SYSTEM_SCAFFOLD.format(**prompt_variables(b))
+
+
+def customer_block(
+    *, name: str | None, default_address: str | None, order_count: int
+) -> str | None:
+    """The per-customer "RETURNING CUSTOMER" context appended to the prompt at runtime.
+
+    This is NOT part of the per-tenant LangSmith template — it's per-conversation and loaded
+    server-side from the customer record (so a returning customer isn't re-asked for their name
+    or address). Returns ``None`` for a first-time/empty profile (nothing to personalise)."""
+    lines: list[str] = []
+    if name:
+        lines.append(
+            f"- Name: {name}. Greet them by name once, naturally; do NOT ask their name again."
+        )
+    if default_address:
+        lines.append(
+            f"- Saved delivery address: {default_address}. For a DELIVERY order the system reuses "
+            "their saved area + address automatically and shows it on the confirm screen - you do "
+            "NOT re-ask or re-offer it. If they want it changed, that goes through update_detail."
+        )
+    if order_count and order_count > 0:
+        lines.append(f"- They have ordered from you {order_count} time(s) before.")
+    if not lines:
+        return None
+    return (
+        "<returning_customer>\n"
+        "RETURNING CUSTOMER (saved details, loaded for you - use to personalise; never invent):\n"
+        + "\n".join(lines)
+        + "\n</returning_customer>"
+    )

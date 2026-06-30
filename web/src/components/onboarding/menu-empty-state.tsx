@@ -1025,7 +1025,7 @@ export function MenuDishDrawer({
                   data-compact-dish-only={!definitionLocked || undefined}
                   className={cn(
                     "rounded-lg border border-border bg-background",
-                    definitionLocked ? "p-2" : "p-2",
+                    "p-3",
                   )}
                 >
                   <div className={cn(
@@ -1047,30 +1047,32 @@ export function MenuDishDrawer({
                         </div>
                       ) : null}
                     </div>
-                    <div className="ml-auto flex items-start gap-1">
+                    <div className="ml-auto flex items-center gap-2">
                       {definitionLocked ? (
                         <div
                           data-compact-template-rules="true"
-                          className="flex items-end gap-2"
+                          className="flex items-center gap-4"
                         >
-                          <Field className="gap-1">
-                            <FieldLabel className="text-xs">Required</FieldLabel>
-                            <div className="flex h-8 items-center">
-                              <Switch
-                                checked={group.isRequired}
-                                onCheckedChange={(checked) =>
-                                  updateGroup(group.clientId, {
-                                    isRequired: checked,
-                                    minSelect: checked ? "1" : "0",
-                                  })
-                                }
-                                aria-label={`${group.name || "Option group"} required`}
-                              />
-                            </div>
-                          </Field>
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-medium text-muted-foreground">
+                              Required
+                            </span>
+                            <Switch
+                              checked={group.isRequired}
+                              onCheckedChange={(checked) =>
+                                updateGroup(group.clientId, {
+                                  isRequired: checked,
+                                  minSelect: checked ? "1" : "0",
+                                })
+                              }
+                              aria-label={`${group.name || "Option group"} required`}
+                            />
+                          </div>
                           {group.selectType === "multi" ? (
-                            <Field className="gap-1">
-                              <FieldLabel className="text-xs">Maximum choices</FieldLabel>
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs font-medium text-muted-foreground">
+                                Max
+                              </span>
                               <LimitSelect
                                 compact
                                 allowZero={false}
@@ -1080,7 +1082,7 @@ export function MenuDishDrawer({
                                 }
                                 ariaLabel={`${group.name || "Option group"} maximum choices`}
                               />
-                            </Field>
+                            </div>
                           ) : null}
                         </div>
                       ) : null}
@@ -1171,10 +1173,10 @@ export function MenuDishDrawer({
                   {!definitionLocked ? (
                   <div
                     className={cn(
-                      "mt-2 grid gap-2 sm:items-end",
+                      "mt-2 grid gap-x-6 gap-y-3 sm:w-fit sm:items-end",
                       group.selectType === "multi"
-                        ? "sm:grid-cols-[minmax(160px,1fr)_80px_128px]"
-                        : "sm:grid-cols-[minmax(160px,1fr)_80px]",
+                        ? "sm:grid-cols-[auto_auto_auto]"
+                        : "sm:grid-cols-[auto_auto]",
                     )}
                   >
 

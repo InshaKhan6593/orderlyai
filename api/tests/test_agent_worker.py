@@ -118,6 +118,15 @@ def test_agent_input_location_and_media():
         "Confirm the order.",
         True,
     )
+    # A category-dropdown tap (id "category:<name>", title = the category) routes as a plain
+    # browse for that category — the row title is what the agent acts on.
+    assert ai(
+        {"type": "interactive", "reply_id": "category:Burgers", "text": "Burgers"}
+    ) == ("Burgers", False)
+    # A product-row tap carries its title text through for the agent to describe the item.
+    assert ai(
+        {"type": "interactive", "reply_id": "product:abc-123", "text": "Veg Burger"}
+    ) == ("Veg Burger", False)
 
 
 # --------------------------------------------------------------------------- #
@@ -346,6 +355,26 @@ def test_post_message_hard_error_not_retried(monkeypatch):
     assert client.calls == 1  # gave up immediately on a non-retryable error
 
 
+def test_post_message_non_ascii_token_fails_clean_without_crashing():
+    # A token mangled by copy-paste (here an em-dash) can't be ASCII-encoded into an HTTP header.
+    # The send must return a clear, non-retryable result instead of raising UnicodeEncodeError up
+    # the worker and crashing the drain.
+    client = _FakeClient([])  # never reached — the credential is rejected before any HTTP call
+
+    async def _run():
+        return await whatsapp_service._post_message(
+            phone_number_id="p",
+            access_token="EAAB" + chr(0x2014) + "badtoken",  # em-dash slipped in via copy-paste
+            payload={"to": "x"},
+            client=client,
+        )
+
+    result = asyncio.run(_run())
+    assert not result.ok and result.retryable is False
+    assert result.error_code == whatsapp_service.ERROR_INVALID_CREDENTIALS
+    assert client.calls == 0  # short-circuited before touching the network
+
+
 # --------------------------------------------------------------------------- #
 # Order-status notifications (24h window)
 # --------------------------------------------------------------------------- #
@@ -404,7 +433,7 @@ def test_status_notification_sends_within_window(client, menu, monkeypatch):
     assert sent_ok is True
     assert len(sent) == 1
     assert sent[0]["to"] == "16500009999"
-    assert f"#{order['order_no']}" in sent[0]["body"]
+    assert order["order_code"] in sent[0]["body"]  # customer-facing code, not "#2"
 
     # Outside the window with no template configured → nothing sent.
     monkeypatch.setattr(settings, "whatsapp_order_status_template", None)
@@ -412,6 +441,23 @@ def test_status_notification_sends_within_window(client, menu, monkeypatch):
     sent_out = asyncio.run(_mark_recent_then_notify(within=False))
     assert sent_out is False
     assert sent == []
+
+
+def test_status_notification_recorded_in_agent_memory(client, business):
+    # A sent status ping is written into the customer's agent thread so a follow-up reply has it
+    # in context (otherwise these out-of-band pings are invisible to the agent).
+    from app.agent.runtime import get_whatsapp_agent, thread_id_for
+
+    _, biz = business
+    phone = "16500003333"
+    text = "Your order K7Q2X9 is out for delivery."
+    asyncio.run(notification_service.record_status_in_agent_memory(biz, phone, text))
+
+    agent = get_whatsapp_agent()
+    config = {"configurable": {"thread_id": thread_id_for(biz, phone)}}
+    state = asyncio.run(agent.aget_state(config))
+    contents = [getattr(m, "content", "") for m in (state.values.get("messages") or [])]
+    assert any(text in c for c in contents)
 
 
 # --------------------------------------------------------------------------- #

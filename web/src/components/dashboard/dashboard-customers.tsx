@@ -2,9 +2,10 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { MessageCircle, Users } from "lucide-react";
+import { ChevronLeft, ChevronRight, Users } from "lucide-react";
 import { toast } from "sonner";
 
+import { WhatsAppIcon } from "@/components/brand/whatsapp-icon";
 import { DashboardShell } from "@/components/dashboard/dashboard-shell";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -25,10 +26,13 @@ import {
 } from "@/lib/business-selection";
 import { listBusinesses, type Business } from "@/lib/business-profile";
 import {
+  listDashboardCustomers,
   listDashboardOrders,
   toggleAcceptingOrders,
-  type DashboardOrder,
+  type DashboardCustomer,
 } from "@/lib/dashboard";
+
+const PAGE_SIZE = 10;
 
 function accessTokenFromStorage(): string | null {
   return (
@@ -37,11 +41,35 @@ function accessTokenFromStorage(): string | null {
   );
 }
 
+function formatDate(value: string | null): string {
+  if (!value) return "—";
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  }).format(new Date(value));
+}
+
+/** Page numbers to render, collapsing long runs with an ellipsis so the jump bar stays compact. */
+function pageItems(current: number, total: number): (number | "ellipsis")[] {
+  if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
+  const items: (number | "ellipsis")[] = [1];
+  const start = Math.max(2, current - 1);
+  const end = Math.min(total - 1, current + 1);
+  if (start > 2) items.push("ellipsis");
+  for (let p = start; p <= end; p += 1) items.push(p);
+  if (end < total - 1) items.push("ellipsis");
+  items.push(total);
+  return items;
+}
+
 export function DashboardCustomersPage() {
   const router = useRouter();
   const [accessToken, setAccessToken] = useState("");
   const [business, setBusiness] = useState<Business | null>(null);
-  const [orders, setOrders] = useState<DashboardOrder[]>([]);
+  const [customers, setCustomers] = useState<DashboardCustomer[]>([]);
+  const [pendingCount, setPendingCount] = useState(0);
+  const [page, setPage] = useState(1);
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
@@ -59,14 +87,15 @@ export function DashboardCustomersPage() {
         const selected = pickBusinessForOwner(businesses);
         if (!selected) throw new ApiError("Complete your business profile first.", 400);
         saveSelectedBusinessId(selected.id);
-        const loadedOrders = await listDashboardOrders({
-          accessToken: token,
-          businessId: selected.id,
-        });
+        const [loadedCustomers, loadedOrders] = await Promise.all([
+          listDashboardCustomers({ accessToken: token, businessId: selected.id }),
+          listDashboardOrders({ accessToken: token, businessId: selected.id }),
+        ]);
         if (!active) return;
         setAccessToken(token);
         setBusiness(selected);
-        setOrders(loadedOrders);
+        setCustomers(loadedCustomers);
+        setPendingCount(loadedOrders.filter((order) => order.status === "pending").length);
       } catch (error) {
         if (!active) return;
         if (error instanceof ApiError && error.status === 401) {
@@ -85,28 +114,12 @@ export function DashboardCustomersPage() {
     };
   }, [router]);
 
-  const pendingCount = orders.filter((order) => order.status === "pending").length;
-  const customers = useMemo(() => {
-    const byId = new Map<
-      string,
-      { name: string; phone: string; orderCount: number; lastOrderAt: string }
-    >();
-    for (const order of orders) {
-      const current = byId.get(order.customer.id);
-      byId.set(order.customer.id, {
-        name: order.customer.name ?? "WhatsApp customer",
-        phone: order.customer.wa_phone,
-        orderCount: (current?.orderCount ?? 0) + 1,
-        lastOrderAt:
-          !current || new Date(order.created_at) > new Date(current.lastOrderAt)
-            ? order.created_at
-            : current.lastOrderAt,
-      });
-    }
-    return [...byId.values()].sort(
-      (a, b) => new Date(b.lastOrderAt).getTime() - new Date(a.lastOrderAt).getTime(),
-    );
-  }, [orders]);
+  const pageCount = Math.max(1, Math.ceil(customers.length / PAGE_SIZE));
+  const currentPage = Math.min(page, pageCount);
+  const visible = useMemo(
+    () => customers.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE),
+    [customers, currentPage],
+  );
 
   async function handleAcceptingOrders(checked: boolean) {
     if (!accessToken || !business) return;
@@ -142,44 +155,117 @@ export function DashboardCustomersPage() {
           <Spinner />
         </div>
       ) : (
-        <div className="mx-auto flex max-w-[960px] flex-col gap-4">
+        <div className="mx-auto flex max-w-[1100px] flex-col gap-4">
           <section>
             <p className="text-sm text-muted-foreground">
               Customer history collected from WhatsApp orders.
             </p>
           </section>
           <Card className="rounded-lg py-0 shadow-sm">
-            <CardHeader className="px-5 py-4">
+            <CardHeader className="flex-row items-center justify-between px-5 py-4">
               <CardTitle className="font-heading text-lg">Recent customers</CardTitle>
+              {customers.length > 0 ? (
+                <span className="text-sm text-muted-foreground">{customers.length} total</span>
+              ) : null}
             </CardHeader>
             <Separator />
             <CardContent className="p-5">
               {customers.length > 0 ? (
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>Name</TableHead>
-                      <TableHead>Phone</TableHead>
-                      <TableHead>Orders</TableHead>
-                      <TableHead className="w-28">Action</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {customers.map((customer) => (
-                      <TableRow key={customer.phone}>
-                        <TableCell className="font-medium">{customer.name}</TableCell>
-                        <TableCell>{customer.phone}</TableCell>
-                        <TableCell>{customer.orderCount}</TableCell>
-                        <TableCell>
-                          <Button variant="outline" size="sm">
-                            <MessageCircle data-icon="inline-start" />
-                            Message
-                          </Button>
-                        </TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
+                <>
+                  <div className="overflow-x-auto">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Name</TableHead>
+                          <TableHead>Phone</TableHead>
+                          <TableHead>Email</TableHead>
+                          <TableHead>Orders</TableHead>
+                          <TableHead>Last order</TableHead>
+                          <TableHead className="w-28">Action</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {visible.map((customer) => (
+                          <TableRow key={customer.id}>
+                            <TableCell className="font-medium">
+                              {customer.name ?? "WhatsApp customer"}
+                            </TableCell>
+                            <TableCell className="whitespace-nowrap">{customer.wa_phone}</TableCell>
+                            <TableCell className="text-muted-foreground">
+                              {customer.email ?? "—"}
+                            </TableCell>
+                            <TableCell>{customer.order_count}</TableCell>
+                            <TableCell className="whitespace-nowrap text-muted-foreground">
+                              {formatDate(customer.last_order_at)}
+                            </TableCell>
+                            <TableCell>
+                              <Button variant="outline" size="sm">
+                                <WhatsAppIcon data-icon="inline-start" />
+                                Message
+                              </Button>
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+
+                  {pageCount > 1 ? (
+                    <nav
+                      className="mt-4 flex items-center justify-between gap-2"
+                      aria-label="Customers pagination"
+                    >
+                      <p className="text-sm text-muted-foreground">
+                        Page {currentPage} of {pageCount}
+                      </p>
+                      <div className="flex items-center gap-1">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="icon-sm"
+                          onClick={() => setPage((p) => Math.max(1, p - 1))}
+                          disabled={currentPage === 1}
+                          aria-label="Previous page"
+                        >
+                          <ChevronLeft />
+                        </Button>
+                        {pageItems(currentPage, pageCount).map((item, index) =>
+                          item === "ellipsis" ? (
+                            <span
+                              key={`ellipsis-${index}`}
+                              className="px-1.5 text-sm text-muted-foreground"
+                              aria-hidden="true"
+                            >
+                              …
+                            </span>
+                          ) : (
+                            <Button
+                              key={item}
+                              type="button"
+                              variant={item === currentPage ? "default" : "outline"}
+                              size="icon-sm"
+                              onClick={() => setPage(item)}
+                              aria-label={`Page ${item}`}
+                              aria-current={item === currentPage ? "page" : undefined}
+                            >
+                              {item}
+                            </Button>
+                          ),
+                        )}
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="icon-sm"
+                          onClick={() => setPage((p) => Math.min(pageCount, p + 1))}
+                          disabled={currentPage === pageCount}
+                          aria-label="Next page"
+                        >
+                          <ChevronRight />
+                        </Button>
+                      </div>
+                    </nav>
+                  ) : null}
+                </>
               ) : (
                 <div className="grid min-h-[260px] place-items-center text-center">
                   <div>

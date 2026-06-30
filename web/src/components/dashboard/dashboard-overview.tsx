@@ -7,7 +7,7 @@ import { BarChart3, Bell, CalendarDays, ChevronRight, Clock, CreditCard } from "
 import { toast } from "sonner";
 
 import { DashboardShell } from "@/components/dashboard/dashboard-shell";
-import { Badge } from "@/components/ui/badge";
+import { OrderStatusBadge } from "@/components/dashboard/order-status-badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
@@ -30,11 +30,9 @@ import {
   buildDashboardOverview,
   formatMoney,
   listDashboardOrders,
-  statusLabel,
   toggleAcceptingOrders,
   type DashboardOrder,
   type DashboardOverview,
-  type DashboardOrderStatus,
 } from "@/lib/dashboard";
 import { cn } from "@/lib/utils";
 
@@ -51,24 +49,6 @@ function todayLabel(): string {
     month: "long",
     day: "numeric",
   }).format(new Date());
-}
-
-function statusClass(status: DashboardOrderStatus): string {
-  switch (status) {
-    case "pending":
-      return "border-primary/25 bg-primary/10 text-primary";
-    case "accepted":
-      return "border-blue-300 bg-blue-50 text-blue-700";
-    case "preparing":
-      return "border-amber-300 bg-amber-50 text-amber-700";
-    case "ready":
-    case "out_for_delivery":
-      return "border-violet-300 bg-violet-50 text-violet-700";
-    case "completed":
-      return "border-primary/25 bg-primary/10 text-primary";
-    default:
-      return "border-border bg-muted text-muted-foreground";
-  }
 }
 
 function MetricCard({
@@ -117,6 +97,7 @@ function MetricCard({
 }
 
 function RecentOrdersTable({ orders }: { orders: DashboardOrder[] }) {
+  const router = useRouter();
   return (
     <Card className="rounded-lg py-0 shadow-sm">
       <CardHeader className="px-5 py-4">
@@ -143,14 +124,16 @@ function RecentOrdersTable({ orders }: { orders: DashboardOrder[] }) {
           </TableHeader>
           <TableBody>
             {orders.slice(0, 7).map((order) => (
-              <TableRow key={order.id}>
-                <TableCell className="font-semibold">#{order.order_no}</TableCell>
+              <TableRow
+                key={order.id}
+                onClick={() => router.push(`/dashboard/orders?order=${order.id}`)}
+                className="cursor-pointer hover:bg-muted/50"
+              >
+                <TableCell className="font-semibold">{order.order_code}</TableCell>
                 <TableCell>{order.customer.name ?? order.customer.wa_phone}</TableCell>
                 <TableCell>Rs {formatMoney(order.total)}</TableCell>
                 <TableCell>
-                  <Badge variant="outline" className={statusClass(order.status)}>
-                    {statusLabel(order.status)}
-                  </Badge>
+                  <OrderStatusBadge status={order.status} />
                 </TableCell>
                 <TableCell>
                   <ChevronRight className="size-4 text-muted-foreground" />

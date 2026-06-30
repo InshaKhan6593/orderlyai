@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 
 from conftest import _TestSession
-from app.agent.tools import get_order_status, reorder
+from app.agent.tools import get_order_status, reorder, update_cart_quantity
 
 
 # --------------------------------------------------------------------------- #
@@ -80,6 +80,23 @@ def _run(coro):
 
 
 # --------------------------------------------------------------------------- #
+# update_cart_quantity now also handles removal (remove_from_cart was dropped)
+# --------------------------------------------------------------------------- #
+def test_update_cart_quantity_zero_removes_the_line():
+    line = {
+        "product_id": "p1",
+        "name": "Burger",
+        "quantity": 2,
+        "option_item_ids": [],
+        "options_label": "",
+    }
+    rt = _Runtime("biz", "16500001111", cart=[line])
+    cmd = _run(update_cart_quantity.coroutine(line_index=1, quantity=0, runtime=rt))
+    assert cmd.update["cart"] == []  # line removed, not just zeroed
+    assert "Removed" in cmd.update["messages"][0].content
+
+
+# --------------------------------------------------------------------------- #
 # reorder — happy path
 # --------------------------------------------------------------------------- #
 def test_reorder_rebuilds_cart_from_most_recent_order(client, business, monkeypatch):
@@ -89,7 +106,7 @@ def test_reorder_rebuilds_cart_from_most_recent_order(client, business, monkeypa
 
     monkeypatch.setattr("app.agent.tools.SessionLocal", _TestSession)
     rt = _Runtime(biz, "16500001111", cart=[])
-    cmd = _run(reorder.coroutine(order_no=None, runtime=rt))
+    cmd = _run(reorder.coroutine(order_code=None, runtime=rt))
 
     cart = cmd.update["cart"]
     assert len(cart) == 1
@@ -108,7 +125,7 @@ def test_reorder_specific_order_number(client, business, monkeypatch):
 
     monkeypatch.setattr("app.agent.tools.SessionLocal", _TestSession)
     rt = _Runtime(biz, "16500001111", cart=[])
-    cmd = _run(reorder.coroutine(order_no=first["order_no"], runtime=rt))
+    cmd = _run(reorder.coroutine(order_code=first["order_code"], runtime=rt))
 
     cart = cmd.update["cart"]
     assert len(cart) == 1
@@ -130,7 +147,7 @@ def test_reorder_reprices_against_live_menu_not_snapshot(client, business, monke
 
     monkeypatch.setattr("app.agent.tools.SessionLocal", _TestSession)
     rt = _Runtime(biz, "16500001111", cart=[])
-    cmd = _run(reorder.coroutine(order_no=None, runtime=rt))
+    cmd = _run(reorder.coroutine(order_code=None, runtime=rt))
 
     assert cmd.update["cart"][0]["name"] == "Cheeseburger"
     assert "Cheeseburger" in cmd.update["messages"][0].content
@@ -151,7 +168,7 @@ def test_reorder_skips_unavailable_item(client, business, monkeypatch):
 
     monkeypatch.setattr("app.agent.tools.SessionLocal", _TestSession)
     rt = _Runtime(biz, "16500001111", cart=[])
-    cmd = _run(reorder.coroutine(order_no=None, runtime=rt))
+    cmd = _run(reorder.coroutine(order_code=None, runtime=rt))
 
     # Nothing re-addable → cart is left untouched (no cart key in the update) and we explain.
     assert "cart" not in cmd.update
@@ -188,7 +205,7 @@ def test_reorder_skips_archived_but_adds_the_rest(client, business, monkeypatch)
 
     monkeypatch.setattr("app.agent.tools.SessionLocal", _TestSession)
     rt = _Runtime(biz, "16500001111", cart=[])
-    cmd = _run(reorder.coroutine(order_no=None, runtime=rt))
+    cmd = _run(reorder.coroutine(order_code=None, runtime=rt))
 
     cart = cmd.update["cart"]
     assert len(cart) == 1  # only Fries survived
@@ -214,7 +231,7 @@ def test_reorder_appends_to_existing_cart(client, business, monkeypatch):
         "options_label": "",
     }
     rt = _Runtime(biz, "16500001111", cart=[existing])
-    cmd = _run(reorder.coroutine(order_no=None, runtime=rt))
+    cmd = _run(reorder.coroutine(order_code=None, runtime=rt))
 
     cart = cmd.update["cart"]
     assert len(cart) == 2  # the pre-existing line is kept, the reordered line appended
@@ -227,7 +244,7 @@ def test_reorder_no_previous_order_is_friendly(client, business, monkeypatch):
 
     monkeypatch.setattr("app.agent.tools.SessionLocal", _TestSession)
     rt = _Runtime(biz, "16500009999", cart=[])  # this phone never ordered
-    cmd = _run(reorder.coroutine(order_no=None, runtime=rt))
+    cmd = _run(reorder.coroutine(order_code=None, runtime=rt))
 
     assert "cart" not in cmd.update
     assert "couldn't find a past order" in cmd.update["messages"][0].content.lower()
@@ -244,7 +261,7 @@ def test_reorder_is_customer_scoped(client, business, monkeypatch):
     monkeypatch.setattr("app.agent.tools.SessionLocal", _TestSession)
     # A DIFFERENT phone cannot see (or repeat) the first customer's order.
     rt = _Runtime(biz, "16500002222", cart=[])
-    cmd = _run(reorder.coroutine(order_no=None, runtime=rt))
+    cmd = _run(reorder.coroutine(order_code=None, runtime=rt))
     assert "cart" not in cmd.update
     assert "couldn't find" in cmd.update["messages"][0].content.lower()
 
@@ -262,7 +279,7 @@ def test_reorder_is_tenant_scoped(client, business, monkeypatch):
 
     monkeypatch.setattr("app.agent.tools.SessionLocal", _TestSession)
     rt = _Runtime(other["id"], "16500001111", cart=[])
-    cmd = _run(reorder.coroutine(order_no=None, runtime=rt))
+    cmd = _run(reorder.coroutine(order_code=None, runtime=rt))
     assert "cart" not in cmd.update
     assert "couldn't find" in cmd.update["messages"][0].content.lower()
 
@@ -273,13 +290,13 @@ def test_reorder_is_tenant_scoped(client, business, monkeypatch):
 def test_get_order_status_lists_items_with_quantities(client, business, monkeypatch):
     owner, biz = business
     prod, large = _seed_burger(client, owner, biz)
-    _create_order(client, owner, biz, prod["id"], "16500001111", qty=2, options=[large["id"]])
+    order = _create_order(client, owner, biz, prod["id"], "16500001111", qty=2, options=[large["id"]])
 
     monkeypatch.setattr("app.agent.tools.SessionLocal", _TestSession)
     rt = _Runtime(biz, "16500001111", cart=[])
-    out = _run(get_order_status.coroutine(order_no=None, runtime=rt))
+    out = _run(get_order_status.coroutine(order_code=None, runtime=rt))
 
-    assert "Order #" in out
+    assert f"Order {order['order_code']}" in out  # shown by its short code, not "#2"
     assert "Burger x2" in out  # item name + quantity now surfaced
     assert "Large" in out  # chosen option shown too
 
@@ -289,5 +306,5 @@ def test_get_order_status_no_orders(client, business, monkeypatch):
     _seed_burger(client, owner, biz)
     monkeypatch.setattr("app.agent.tools.SessionLocal", _TestSession)
     rt = _Runtime(biz, "16500007777", cart=[])
-    out = _run(get_order_status.coroutine(order_no=None, runtime=rt))
+    out = _run(get_order_status.coroutine(order_code=None, runtime=rt))
     assert "No orders found" in out

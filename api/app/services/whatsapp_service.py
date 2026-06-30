@@ -36,6 +36,9 @@ _RETRYABLE_META_CODES = {4, 80007, 130429, 131048, 131056, 133016}
 ERROR_REENGAGEMENT = 131047
 ERROR_UNDELIVERABLE = 131026
 ERROR_TOKEN_EXPIRED = 190
+# Our own sentinel (not a Meta code): the stored credentials can't even be put on the wire — e.g. a
+# non-ASCII access token from a bad copy-paste. Non-retryable; the connection needs to be re-saved.
+ERROR_INVALID_CREDENTIALS = "invalid_credentials"
 
 
 @dataclass
@@ -44,7 +47,7 @@ class SendResult:
 
     ok: bool
     status_code: int | None = None
-    error_code: int | None = None
+    error_code: int | str | None = None
     error_subcode: int | None = None
     error_message: str | None = None
     retryable: bool = False
@@ -204,6 +207,25 @@ async def _post_message(
     url = f"{_GRAPH_BASE}/{phone_number_id}/messages"
     headers = {"Authorization": f"Bearer {access_token}"}
     to = payload.get("to", "?")
+    # HTTP header values must be ASCII. A token copied through a word processor or chat can pick up a
+    # "smart" character (e.g. an em-dash), which would otherwise raise UnicodeEncodeError deep in
+    # httpx's request build and crash the worker mid-drain. Fail fast and clearly instead, so the row
+    # is dead-lettered and the connection is flagged for re-auth.
+    if not (access_token.isascii() and str(phone_number_id).isascii()):
+        logger.error(
+            "WhatsApp credentials for %s contain non-ASCII characters; refusing to send. The "
+            "access token must be re-copied from Meta and saved again.",
+            to,
+        )
+        return SendResult(
+            ok=False,
+            error_code=ERROR_INVALID_CREDENTIALS,
+            error_message=(
+                "WhatsApp access token contains non-ASCII characters. Re-copy it from Meta and "
+                "update the WhatsApp connection."
+            ),
+            retryable=False,
+        )
     attempts = max(1, settings.whatsapp_send_max_retries)
     owns_client = client is None
     client = client or httpx.AsyncClient(timeout=15)
@@ -215,6 +237,9 @@ async def _post_message(
             except httpx.HTTPError as exc:
                 logger.warning("WhatsApp send to %s network error: %s", to, exc)
                 last = SendResult(ok=False, error_message=str(exc), retryable=True)
+            except Exception as exc:  # noqa: BLE001 — a malformed payload must not crash the drain
+                logger.exception("WhatsApp send to %s raised a non-HTTP error; not retrying", to)
+                return SendResult(ok=False, error_message=str(exc), retryable=False)
             else:
                 if resp.status_code < 400:
                     return SendResult(

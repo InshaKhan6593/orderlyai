@@ -35,6 +35,17 @@ def test_outsider_cannot_create_category(client, business):
     assert r.status_code == 403
 
 
+def test_outsider_cannot_upload_product_image(client, business):
+    _, biz_id = business
+    outsider = _other_owner(client)
+    r = client.post(
+        f"/api/v1/businesses/{biz_id}/products/images",
+        content=b"image-bytes",
+        headers={**outsider, "content-type": "image/png"},
+    )
+    assert r.status_code == 403
+
+
 def test_owner_only_lists_own_businesses(client, business):
     _, biz_id = business
     outsider = _other_owner(client)

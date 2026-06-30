@@ -26,9 +26,19 @@ class Customer(UUIDMixin, TimestampMixin, Base):
     )
     wa_phone: Mapped[str] = mapped_column(String(32), nullable=False)
     name: Mapped[str | None] = mapped_column(String(255))
+    email: Mapped[str | None] = mapped_column(String(255))
+    alternate_phone: Mapped[str | None] = mapped_column(String(32))
     default_address: Mapped[str | None] = mapped_column(Text)
+    # The customer's usual delivery AREA, reused on later orders so they aren't re-asked. SET NULL
+    # if the zone is deleted; re-validated as still-active before reuse at checkout.
+    default_zone_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("delivery_zones.id", ondelete="SET NULL")
+    )
     order_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     last_order_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # When the customer last messaged us — the start of Meta's 24h free-form window. After
+    # 24h, proactive messages must be pre-approved templates (see whatsapp notifications).
+    last_inbound_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     marketing_opt_in: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     notes: Mapped[str | None] = mapped_column(Text)
 

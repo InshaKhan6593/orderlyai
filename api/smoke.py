@@ -79,7 +79,7 @@ def main() -> None:
         expected = Decimal("850") + Decimal("250")  # unit price with Large
         expected_total = expected * 2  # qty 2, pickup → no delivery/packaging
         got_total = Decimal(str(order["total"]))
-        print(f"order #{order['order_no']} total={got_total} expected={expected_total}")
+        print(f"order {order['order_code']} total={got_total} expected={expected_total}")
         assert got_total == expected_total, f"PRICING WRONG: {got_total} != {expected_total}"
 
         r = c.patch(

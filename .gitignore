@@ -10,11 +10,17 @@ __pycache__/
 .env
 .env.*
 !.env.example
+uploads/
+api/uploads/
+api/.langgraph_api/
 
 # Node / Next (frontend later)
 node_modules/
 .next/
 out/
+
+# Logs
+*.log
 
 # OS / editor
 .DS_Store

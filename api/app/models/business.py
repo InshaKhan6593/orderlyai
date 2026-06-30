@@ -12,11 +12,13 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.models.base import Base, TimestampMixin, UUIDMixin
 
 if TYPE_CHECKING:
+    from app.models.agent import AgentConfig
     from app.models.customer import Customer
-    from app.models.menu import Category, Product
+    from app.models.menu import Category, ModifierGroup, Product
     from app.models.ops import BusinessHours, DeliveryZone
     from app.models.order import Order
     from app.models.user import User
+    from app.models.whatsapp import WhatsAppConnection
 
 
 class Business(UUIDMixin, TimestampMixin, Base):
@@ -72,6 +74,9 @@ class Business(UUIDMixin, TimestampMixin, Base):
     products: Mapped[list["Product"]] = relationship(
         back_populates="business", cascade="all, delete-orphan"
     )
+    modifier_groups: Mapped[list["ModifierGroup"]] = relationship(
+        back_populates="business", cascade="all, delete-orphan"
+    )
     hours: Mapped[list["BusinessHours"]] = relationship(
         back_populates="business", cascade="all, delete-orphan"
     )
@@ -83,6 +88,12 @@ class Business(UUIDMixin, TimestampMixin, Base):
     )
     orders: Mapped[list["Order"]] = relationship(
         back_populates="business", cascade="all, delete-orphan"
+    )
+    agent_config: Mapped["AgentConfig | None"] = relationship(
+        back_populates="business", cascade="all, delete-orphan", uselist=False
+    )
+    whatsapp_connection: Mapped["WhatsAppConnection | None"] = relationship(
+        back_populates="business", cascade="all, delete-orphan", uselist=False
     )
 
 

@@ -6,7 +6,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field
 
 from app.schemas.common import ORMModel
 
@@ -24,6 +24,8 @@ class OrderLineIn(BaseModel):
 class OrderCreate(BaseModel):
     customer_phone: str = Field(min_length=3, max_length=32)
     customer_name: str | None = None
+    customer_email: EmailStr | None = None
+    customer_alt_phone: str | None = Field(default=None, max_length=32)
     fulfillment: str = Field(pattern="^(delivery|pickup)$")
     address: str | None = None
     zone_id: uuid.UUID | None = None
@@ -54,11 +56,28 @@ class OrderStatusHistoryOut(ORMModel):
     created_at: datetime
 
 
+class OrderCustomerOut(ORMModel):
+    id: uuid.UUID
+    name: str | None
+    wa_phone: str
+    email: str | None
+    alternate_phone: str | None
+
+
+class OrderZoneOut(ORMModel):
+    id: uuid.UUID
+    name: str
+    fee: Decimal
+    min_order: Decimal
+    eta_minutes: int | None
+
+
 class OrderOut(ORMModel):
     id: uuid.UUID
     business_id: uuid.UUID
     customer_id: uuid.UUID
-    order_no: int
+    order_no: int  # internal sequence (kept for the owner's records; not shown as the order id)
+    order_code: str  # the customer-facing order id (e.g. "K7Q2X9")
     channel: str
     status: str
     fulfillment: str
@@ -72,5 +91,7 @@ class OrderOut(ORMModel):
     payment_status: str
     notes: str | None
     created_at: datetime
+    customer: OrderCustomerOut
+    zone: OrderZoneOut | None
     items: list[OrderItemOut] = Field(default_factory=list)
     status_history: list[OrderStatusHistoryOut] = Field(default_factory=list)

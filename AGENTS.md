@@ -25,12 +25,12 @@ is one **tenant**). Target scale: 100–150+ business tenants.
 
 | Area | State |
 |------|-------|
-| **Backend CMS API** (`api/`) | ✅ Built, running, and tested (43 passing tests) |
+| **Backend CMS API** (`api/`) | ✅ Built, running, and tested (90 passing tests) |
 | Database (Postgres 16 in Docker) | ✅ Schema + Alembic migrations applied |
 | Auth (self-managed JWT) | ✅ Done |
-| **Frontend** (Next.js) | ❌ Not built yet — screens are prototyped (see design docs) |
-| **WhatsApp AI agent** (LangGraph + Claude) | ❌ Not built yet — planned to live inside `api/` |
-| WhatsApp Cloud API integration | ❌ Not built yet |
+| **Frontend** (Next.js) | 🚧 In progress in `web/` (Next.js 16 + Tailwind v4 + shadcn/ui). Auth, onboarding steps 1–8, WhatsApp connection setup, review/go-live, and owner dashboard routes (`/dashboard`, `/dashboard/orders`, `/dashboard/menu`, `/dashboard/customers`, `/dashboard/settings`) are built; business profile, fulfillment, menu builder, AI assistant config, order board/status updates, and settings profile are wired to the API |
+| **WhatsApp AI agent** (LangChain v1 + Claude) | 🚧 Core agent built in `api/app/agent/` (graph, tenant-scoped tools, per-tenant prompt as a LangSmith-managed template, middleware, Pydantic structured output) + tested, and **wired to the WhatsApp webhook**. Now **durable**: Postgres checkpointer, ordering-domain summarization, per-turn model-call cap. **Latency/context-optimized**: the menu is preloaded into the system prompt (and `get_menu` is dropped from the tool set on those turns, falling back to the tool only for very large menus), a model-agnostic `ContextEditingMiddleware` clears stale tool outputs from each model call, and a short-TTL per-tenant snapshot cache coalesces the per-turn DB loads. See `docs/agent/ARCHITECTURE.md` |
+| WhatsApp Cloud API integration | 🚧 Production-hardened. Connection setup + webhook (verify/signature) done; inbound messages persist to a **durable inbox** (`whatsapp_inbox`) before ACK, are **deduped** by `message_id`, **serialized + coalesced** per conversation via a Postgres advisory lock (held on a **dedicated pinned connection** so the work session's commits can't strand it), with **bounded drain concurrency**, processed by the agent on the **durable Postgres checkpointer**, with **retry-safe + resumable sends** and a **sweeper** for crash recovery. Outbound has retry/backoff + Meta error handling, records **failed** delivery receipts, and order-status changes notify the customer (free-form in the 24h window; templates plumbed for later). A human handoff auto-resumes after `whatsapp_handoff_mute_hours`. See `api/app/services/whatsapp_worker.py` |
 | Billing (Stripe + `plan`/`subscription`) | ❌ Not built — schema is forward-compatible (`business.plan_code` exists) |
 
 When you finish a unit of work, update this table if the status changed.
@@ -52,6 +52,8 @@ When you finish a unit of work, update this table if the status changed.
 7. **Don't print emojis/Unicode in scripts** — the Windows console is cp1252 and will crash on them.
 8. The backend stays in **Python**: the WhatsApp agent will be Python/LangGraph, so don't split the API into
    another language.
+9. **Frontend work has its own local instructions.** Before editing `web/`, read `web/AGENTS.md`; it owns
+   Next.js/shadcn commands, UI conventions, and onboarding-specific rules.
 
 ---
 
@@ -63,7 +65,7 @@ When you finish a unit of work, update this table if the status changed.
 - **Validation:** Pydantic v2 (2.13) + pydantic-settings.
 - **Auth:** PyJWT (HS256) + argon2-cffi for password hashing. Bearer tokens (no Supabase, no OAuth).
 - **Tooling:** `uv` (package manager), `pytest` + `httpx`/TestClient.
-- Frontend (later): Next.js 15 + TypeScript + Tailwind + shadcn/ui.
+- Frontend (in progress, `web/`): Next.js 16 + TypeScript + Tailwind v4 + shadcn/ui (Base UI) + pnpm.
 
 Pin nothing by hand — `uv` resolves from `pyproject.toml`. Use `uv add <pkg>` to add dependencies.
 
@@ -78,8 +80,12 @@ Clone/push over HTTPS. `.env` and `.venv/` are gitignored — never commit them.
 orderlyai/
 ├── AGENTS.md                  # this file
 ├── README.md                  # human run instructions
+├── .mcp.json                  # shadcn MCP server (project-scoped, for AI agents)
 ├── docker-compose.yml         # Postgres 16, host port 55432
 ├── screens/                   # design mockups (onboarding + dashboard PNG screens)
+├── web/                       # Next.js 16 frontend (App Router, Tailwind v4, shadcn/ui)
+│   ├── components.json        # shadcn config (style: base-nova, Base UI, lucide)
+│   └── src/{app,components,lib}/
 └── api/
     ├── pyproject.toml         # deps + pytest config (uv-managed)
     ├── uv.lock
@@ -87,6 +93,7 @@ orderlyai/
     ├── .env / .env.example    # config (DATABASE_URL, JWT_SECRET, CORS, …)
     ├── Dockerfile             # for later deployment
     ├── smoke.py               # end-to-end smoke script (uv run python smoke.py)
+    ├── sync_prompt.py         # push the in-code agent prompt to LangSmith (uv run python sync_prompt.py)
     ├── migrations/            # Alembic (async env.py)
     │   └── versions/
     ├── tests/                 # pytest: conftest + test_auth/test_orders/test_tenant_isolation
@@ -110,8 +117,8 @@ orderlyai/
 
 ## 6. Local development
 
-**Prerequisites:** Docker, `uv`. There is a **native PostgreSQL 17 on port 5432**, so our container uses
-**host port 55432** (`DATABASE_URL` already points there). Do not change this to 5432.
+**Prerequisites:** Docker, `uv`, and `pnpm`. There is a **native PostgreSQL 17 on port 5432**, so our
+container uses **host port 55432** (`DATABASE_URL` already points there). Do not change this to 5432.
 
 ```bash
 # from repo root
@@ -122,14 +129,38 @@ uv sync                                                       # install deps int
 uv run alembic upgrade head                                   # apply migrations
 uv run uvicorn app.main:app --reload --reload-dir app --port 8000
 #   ↑ --reload-dir app is REQUIRED: otherwise uvicorn watches .venv and reload-loops
+
+# To exercise the WhatsApp agent with DURABLE memory locally (the Postgres checkpointer),
+# use the launcher instead — on Windows it runs uvicorn inside a SelectorEventLoop so
+# psycopg async works (the plain CLI above falls back to in-process memory on Windows):
+uv run python run.py --no-reload                             # honors PORT/HOST env
 ```
 
 - API docs: http://localhost:8000/docs  ·  Health: http://localhost:8000/health
+- WhatsApp webhook tunnel (run in a second PowerShell after the API is listening on `:8000`; it can run from
+  any directory, but use the repo root for consistency):
+
+```powershell
+cd "C:\Users\Insha Khan\orderlyai"
+& "C:\Users\Insha Khan\AppData\Local\Microsoft\WindowsApps\ngrok.ngrok_1g87z0zv29zzc\ngrok.exe" http 8000
+```
+
+- Meta callback URL format: `https://<ngrok-host>.ngrok-free.app/api/v1/whatsapp/webhook`.
+- Meta verify token: use `WHATSAPP_VERIFY_TOKEN` from `api/.env` (do not hardcode the real token in docs or
+  commits). To view it locally:
+
+```powershell
+Select-String -Path "C:\Users\Insha Khan\orderlyai\api\.env" -Pattern "^WHATSAPP_VERIFY_TOKEN="
+```
+
 - Tests: `uv run pytest`  (uses a separate `orderlyai_test` database, created/dropped per session)
 - Smoke: `uv run python smoke.py`
 - New migration: `uv run alembic revision --autogenerate -m "msg"` then review the file, then `upgrade head`.
 
 Always run commands with `uv run …` from the `api/` directory (so `.env` and the `app` package resolve).
+
+Frontend setup, checks, and UI conventions live in `web/AGENTS.md`. For frontend changes, follow that file
+and run the relevant `pnpm` checks from `web/`.
 
 ---
 
@@ -137,14 +168,14 @@ Always run commands with `uv run …` from the `api/` directory (so `.env` and t
 
 ### Request lifecycle
 `HTTP → FastAPI router → dependency (auth + tenant) → service (logic) → SQLAlchemy (async) → Pydantic response`.
-The frontend (later) and the WhatsApp agent both go through this same API/services layer.
+The frontend and the WhatsApp agent both go through this same API/services layer.
 
 ### Multi-tenancy & security (critical)
 - Tenant routes are nested: `/api/v1/businesses/{business_id}/<resource>`.
 - Handlers depend on **`BusinessDep`** (`business: BusinessDep`), which runs `get_business`: it verifies the
   caller has a `Membership` for that `business_id` (→ 403 if not) and loads the `Business`. Use `business.id`
   to scope every query: `where(Model.business_id == business.id)`.
-- Denormalized `business_id` exists even on child tables (e.g. `order_items`, `product_option_items`) so every
+- Denormalized `business_id` exists even on child tables (e.g. `order_items`, `modifier_options`) so every
   query can be scoped without joins.
 - RLS is **not** relied upon locally; app-layer scoping is the guard. (This mirrors the CVE-2024-10976 defense
   -in-depth note from the design docs.) If you add a tenant table, add a tenant-isolation test.
@@ -187,10 +218,12 @@ The frontend (later) and the WhatsApp agent both go through this same API/servic
 
 ---
 
-## 8. Data model (13 tables)
+## 8. Data model (16 tables)
 
 ```
-users ─< memberships >─ businesses ─┬─< categories ─< products ─< product_option_groups ─< product_option_items
+users ─< memberships >─ businesses ─┬─< categories ─< products ─< product_modifier_groups >─ modifier_groups ─< modifier_options
+                                    │                                └─< product_modifier_option_prices
+                                    ├─< agent_configs
                                     ├─< business_hours
                                     ├─< delivery_zones
                                     ├─< customers ─< orders ─< order_items
@@ -202,12 +235,27 @@ Key points:
   `min_order_amount`, `packaging_fee`), the `accepting_orders` kill-switch, `status`
   (`onboarding|active|paused|suspended`), `plan_code` (billing-ready), and `next_order_no` (the per-business
   order counter).
+- **`agent_configs`** stores the per-business WhatsApp assistant setup used later by the agent runtime:
+  English-only greeting, upsell toggle, human handoff phone, and extra instructions. Tone and auto-approval
+  fields are intentionally not part of the schema.
 - **`memberships`** = (user_id, business_id, role) with role `owner|manager|staff`.
-- **`products`** have `tags text[]`, `is_available` (temporary sold-out), `is_archived` (permanent removal),
-  and nested **option groups → option items** (modifiers, e.g. Size/Add-ons with `price_delta`).
+- **`products`** have `tags text[]`, `is_available` (temporary sold-out), and `is_archived` (permanent removal).
+  Modifier definitions can be reusable templates or dish-specific groups. They attach through
+  `product_modifier_groups`; required/min/max/order and the enabled option subset, dish defaults, and optional
+  per-dish prices live in `product_modifier_option_prices`. Missing option rows mean that option is unavailable
+  for that dish. Group option prices are template defaults; assignment overrides are used when present.
 - **`orders`**: `order_no` is unique per business; `order_items` **snapshot** `name_snapshot` + `price_snapshot`
   + chosen `options_json` so historical orders never change when the menu changes; `order_status_history`
   records every transition.
+- **`customers.last_inbound_at`** tracks the start of Meta's 24h free-form messaging window (set on every
+  inbound message); proactive notifications outside it require approved templates.
+- **`whatsapp_inbox`** is the durable inbound queue for the agent: one row per inbound message, unique on
+  Meta `message_id` (dedup), with `status` (pending/answered/done/failed/skipped), `attempts`, and the
+  rendered `response` (so a failed send re-delivers without re-running the agent). `sent_count` resumes a
+  partial multi-message send without duplicating; `sent_message_ids`/`delivery_state` (GIN-indexed) record
+  outbound **failed** delivery-status webhooks. A retention sweep purges rows + the LangGraph checkpoint for
+  conversations inactive past `whatsapp_retention_days`. LangGraph's own `checkpoint*` tables are created by
+  the checkpointer's `setup()`, not Alembic — and hold the durable chat log (there is no `messages` table).
 - pgvector/embeddings are intentionally **not** in the schema yet (added in the agent phase).
 
 ---
@@ -219,11 +267,13 @@ Key points:
 | Auth | `POST /auth/register`, `POST /auth/login`, `POST /auth/refresh`, `GET /auth/me` |
 | Businesses | `POST /businesses`, `GET /businesses` (mine), `GET /businesses/{id}`, `PATCH /businesses/{id}` |
 | Categories | `GET/POST /businesses/{id}/categories`, `PATCH/DELETE /…/categories/{cid}` |
-| Products | `GET/POST /businesses/{id}/products`, `GET/PATCH/DELETE /…/products/{pid}` (nested modifiers; `?category_id=`, `?include_archived=`) |
+| Products | `GET/POST /businesses/{id}/products`, `GET/PATCH/DELETE /…/products/{pid}` (modifier assignments; `?category_id=`, `?include_archived=`) |
+| Modifier groups | `GET/POST /businesses/{id}/modifier-groups`, `GET/PATCH/DELETE /…/modifier-groups/{gid}` |
 | Hours | `GET /businesses/{id}/hours`, `PUT /businesses/{id}/hours` (bulk replace) |
 | Delivery zones | `GET/POST /businesses/{id}/delivery-zones`, `PATCH/DELETE /…/delivery-zones/{zid}` |
 | Customers | `GET /businesses/{id}/customers`, `GET /…/customers/{cid}` |
 | Orders | `GET /businesses/{id}/orders` (`?status=`, `?fulfillment=`), `POST /…/orders`, `GET /…/orders/{oid}`, `PATCH /…/orders/{oid}/status` |
+| Agent config | `GET/PUT /businesses/{id}/agent-config` |
 
 ---
 
@@ -237,12 +287,13 @@ Key points:
   Invalid jumps return 400. Every change appends an `order_status_history` row whose `changed_by` is the
   **authenticated user id** (derived server-side, never trusted from the request body). The status update
   loads the order `FOR UPDATE` so concurrent transitions serialize.
-- **Pricing:** `unit = product.price + Σ(option.price_delta)`, `line_total = unit × qty`,
+- **Pricing:** `unit = product.price + Σ(effective option price_delta)`, `line_total = unit × qty`,
   `subtotal = Σ line_totals`, `total = subtotal + delivery_fee + packaging_fee`. Delivery fee comes from the
-  chosen `delivery_zone`; packaging fee from the business. Negative `price_delta` (discounts) is allowed, but a
-  line whose `unit` would go **negative** is rejected (400).
-- **Modifier validation:** on order creation, selected options are validated against the product's own
-  groups — required groups must be chosen, `min_select`/`max_select` are honored, single-select groups accept
+  chosen `delivery_zone`; packaging fee from the business. Effective option prices come from the product's
+  assignment override when present, otherwise the reusable group option default. Negative `price_delta`
+  (discounts) is allowed, but a line whose `unit` would go **negative** is rejected (400).
+- **Modifier validation:** on order creation, selected options are validated against the options explicitly
+  enabled on that product assignment — required groups must be chosen, assignment `min_select`/`max_select` are honored, single-select groups accept
   at most one, duplicate option ids in a line are rejected, and options from another product/business are
   rejected (all → 400). See `order_service.create_order` (products are bulk-fetched in one query).
 - **Category ownership:** a product's `category_id` must belong to the same business (validated on
@@ -274,15 +325,25 @@ Key points:
 - `tests/conftest.py` builds an isolated **`orderlyai_test`** DB (create_all/drop_all per session, NullPool
   engine), overrides `get_db`, and exposes a sync **`TestClient`** plus fixtures: **`client`**, **`owner`**
   (registered user → auth header), **`business`** (owner + created business → `(headers, business_id)`).
-- Coverage today (**43 tests**): `test_auth.py` (register/login/me/dupe/wrong-pw/validation),
+- Coverage today (**62 tests**): `test_auth.py` (register/login/me/dupe/wrong-pw/validation),
   `test_tenant_isolation.py` (outsiders get 403; `GET /businesses` only lists own), `test_orders.py`
   (pricing includes modifier deltas, `order_no` increments, invalid status transition rejected),
   `test_validation_and_crud.py` (enum/"dropdown" values rejected, required fields, business rules incl.
-  **required-modifier enforcement**, and full CRUD lifecycle), and `test_review_fixes.py` (cross-tenant
+  **required-modifier enforcement**, and full CRUD lifecycle), `test_modifier_groups.py` (template/dish-specific
+  creation, atomic assignment updates, enabled subsets, per-dish pricing, cleanup, unassigned-option rejection,
+  and tenant isolation), and `test_review_fixes.py` (cross-tenant
   category rejected, negative/duplicate-option pricing rejected, delivery-zone active+min_order, fulfillment-
   aware status machine, audited `changed_by`, duplicate-hours 422, pagination, input caps).
+- Frontend-specific test guidance lives in `web/AGENTS.md`. For frontend changes, run the relevant `pnpm`
+  checks from `web/` before claiming the work is complete.
 - **When you add a tenant resource, add an isolation test** (an outsider must get 403). When you add pricing or
   status logic, assert the numbers/transitions.
+- **WhatsApp agent worker** (`test_agent_worker.py`, `test_whatsapp_connection.py`): durable dedup by
+  `message_id`, back-to-back coalescing + ordering, confirm-tap as its own turn, retry-safe re-send (agent
+  runs once), per-customer rate limit, multi-message parsing + location/media mapping, outbound retry/backoff
+  + Meta error handling, and order-status notifications (in/out of the 24h window). Tests set
+  `RUN_AGENT_WORKER=false` so the lifespan never starts the durable agent/sweeper; the per-request drain is
+  driven directly against the test DB with the agent + Graph API calls stubbed.
 
 ---
 
@@ -319,8 +380,8 @@ Key points:
 
 ## 14. Roadmap & design docs
 
-**Next up (in order):** Frontend (Next.js, wire to this API) → WhatsApp AI agent (LangGraph + Claude, inside
-`api/`) → WhatsApp Cloud API webhook/worker → billing (Stripe).
+**Next up (in order):** continue the frontend (`web/`) with deeper dashboard menu editor reuse, richer
+dashboard screens, and production auth hardening → WhatsApp AI agent/runtime hardening → billing (Stripe).
 
 **Full product/design source of truth** (research, architecture, exact schema, UI screen-generation prompts,
 build prompts, dashboard prompts) lives **outside this repo** at:

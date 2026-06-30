@@ -4,20 +4,27 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from app.api import (
+    agent_config,
     auth,
     businesses,
     categories,
     customers,
     hours,
+    modifier_groups,
     orders,
     products,
+    whatsapp,
     zones,
 )
 
 api_router = APIRouter()
+api_router.include_router(agent_config.router)
+api_router.include_router(whatsapp.router)
+api_router.include_router(whatsapp.webhook_router)
 api_router.include_router(auth.router)
 api_router.include_router(businesses.router)
 api_router.include_router(categories.router)
+api_router.include_router(modifier_groups.router)
 api_router.include_router(products.router)
 api_router.include_router(hours.router)
 api_router.include_router(zones.router)

@@ -1,6 +1,18 @@
 """Pytest fixtures: isolated test DB (created/dropped per session) + TestClient."""
 from __future__ import annotations
 
+import os
+
+# Must be set BEFORE app.core.config is imported (Settings reads env at import time). Keeps the
+# app lifespan from starting the durable agent / Postgres checkpointer / inbox sweeper during
+# tests — those would touch the dev DB and need network. The webhook's per-request drain is
+# still exercised (tests stub the agent + send path).
+os.environ.setdefault("RUN_AGENT_WORKER", "false")
+os.environ.setdefault("WHATSAPP_DURABLE_MEMORY", "false")
+# Don't fire WhatsApp order-status notifications during order tests (no connection set up;
+# the notification test enables this explicitly).
+os.environ.setdefault("WHATSAPP_NOTIFY_ON_STATUS_CHANGE", "false")
+
 import asyncio
 import uuid
 
@@ -85,31 +97,41 @@ def menu(client, business) -> dict:
     cat = client.post(
         f"/api/v1/businesses/{biz}/categories", json={"name": "Mains"}, headers=owner
     ).json()
+    group = client.post(
+        f"/api/v1/businesses/{biz}/modifier-groups",
+        json={
+            "name": "Size",
+            "select_type": "single",
+            "items": [
+                {"name": "Regular", "price_delta": "0", "is_default": True},
+                {"name": "Large", "price_delta": "250"},
+            ],
+        },
+        headers=owner,
+    ).json()
     prod = client.post(
         f"/api/v1/businesses/{biz}/products",
         json={
             "name": "Burger",
             "price": "850",
             "category_id": cat["id"],
-            "option_groups": [
+            "modifier_groups": [
                 {
-                    "name": "Size",
-                    "select_type": "single",
+                    "modifier_group_id": group["id"],
                     "is_required": True,
-                    "items": [
-                        {"name": "Regular", "price_delta": "0", "is_default": True},
-                        {"name": "Large", "price_delta": "250"},
-                    ],
+                    "min_select": 1,
+                    "max_select": 1,
                 }
             ],
         },
         headers=owner,
     ).json()
-    opts = {i["name"]: i["id"] for g in prod["option_groups"] for i in g["items"]}
+    opts = {item["name"]: item["id"] for item in group["items"]}
     return {
         "owner": owner,
         "biz": biz,
         "product": prod,
+        "group": group,
         "regular": opts["Regular"],
         "large": opts["Large"],
     }

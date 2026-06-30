@@ -31,11 +31,11 @@ def test_invalid_business_status_rejected(client, business):
 def test_invalid_select_type_rejected(client, business):
     owner, biz = business
     r = client.post(
-        f"/api/v1/businesses/{biz}/products",
+        f"/api/v1/businesses/{biz}/modifier-groups",
         json={
-            "name": "P",
-            "price": "10",
-            "option_groups": [{"name": "Size", "select_type": "triple", "items": []}],
+            "name": "Size",
+            "select_type": "triple",
+            "items": [],
         },
         headers=owner,
     )
@@ -154,24 +154,57 @@ def test_category_crud(client, business):
         f"/api/v1/businesses/{biz}/categories/{cid}", json={"name": "Beverages"}, headers=owner
     )
     assert patched.json()["name"] == "Beverages"
+    toggled = client.patch(
+        f"/api/v1/businesses/{biz}/categories/{cid}", json={"is_active": False}, headers=owner
+    )
+    assert toggled.status_code == 200
+    assert toggled.json()["is_active"] is False
     assert client.delete(f"/api/v1/businesses/{biz}/categories/{cid}", headers=owner).status_code == 204
     names = [c["name"] for c in client.get(f"/api/v1/businesses/{biz}/categories", headers=owner).json()]
     assert "Beverages" not in names
 
 
+def test_product_image_upload_writes_static_file(client, business, tmp_path, monkeypatch):
+    from app.api import products as products_api
+
+    monkeypatch.setattr(products_api.settings, "upload_dir", str(tmp_path))
+    owner, biz = business
+    response = client.post(
+        f"/api/v1/businesses/{biz}/products/images",
+        content=b"image-bytes",
+        headers={**owner, "content-type": "image/png"},
+    )
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["image_url"].startswith("http://testserver/uploads/menu/")
+    saved = list(tmp_path.glob(f"menu/{biz}/*.png"))
+    assert len(saved) == 1
+    assert saved[0].read_bytes() == b"image-bytes"
+
+
 def test_product_modifier_replace(client, menu):
     pid, biz, owner = menu["product"]["id"], menu["biz"], menu["owner"]
+    spice = client.post(
+        f"/api/v1/businesses/{biz}/modifier-groups",
+        json={
+            "name": "Spice",
+            "select_type": "single",
+            "items": [{"name": "Mild"}, {"name": "Hot"}],
+        },
+        headers=owner,
+    ).json()
     r = client.patch(
         f"/api/v1/businesses/{biz}/products/{pid}",
         json={
-            "option_groups": [
-                {"name": "Spice", "select_type": "single", "items": [{"name": "Mild"}, {"name": "Hot"}]}
+            "modifier_groups": [
+                {"modifier_group_id": spice["id"], "max_select": 1}
             ]
         },
         headers=owner,
     )
     assert r.status_code == 200
-    groups = r.json()["option_groups"]
+    groups = r.json()["modifier_groups"]
     assert len(groups) == 1 and groups[0]["name"] == "Spice" and len(groups[0]["items"]) == 2
 
 
